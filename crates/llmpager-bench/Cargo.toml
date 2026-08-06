@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+serde_json.workspace = true
 llmpager-core = { path = "../llmpager-core" }
 llmpager-cuda = { path = "../llmpager-cuda", optional = true }
 

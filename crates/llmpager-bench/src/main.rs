@@ -147,6 +147,7 @@ fn gen(f: &Flags) -> Result<()> {
         num_layers: layers,
         experts_per_layer: experts,
         dtype: "raw".into(),
+        config: serde_json::Value::Null,
     };
     let mut w = PackWriter::create(&path, meta).context("creating pack")?;
     // Patterned, compressible-hostile filler; content is irrelevant to I/O.

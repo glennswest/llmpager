@@ -31,8 +31,12 @@ pub struct PackMeta {
     pub model: String,
     pub num_layers: u16,
     pub experts_per_layer: u16,
-    /// Weight encoding of the blobs, e.g. "q4_gs64" (informational for now).
+    /// Weight encoding of the blobs, e.g. "q4g64-gud".
     pub dtype: String,
+    /// Model config the runtime needs (hidden size, intermediate size,
+    /// top-k, ...). Free-form JSON; absent in early packs.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -295,6 +299,7 @@ mod tests {
             num_layers: 3,
             experts_per_layer: 4,
             dtype: "q4_gs64".into(),
+            config: serde_json::Value::Null,
         };
         let mut w = PackWriter::create(&path, meta.clone())?;
         for l in 0..3u16 {
@@ -330,6 +335,7 @@ mod tests {
             num_layers: 1,
             experts_per_layer: 2,
             dtype: "raw".into(),
+            config: serde_json::Value::Null,
         };
         let mut w = PackWriter::create(&path, meta)?;
         w.add_blob(&[1, 2, 3])?;
@@ -347,6 +353,7 @@ mod tests {
             num_layers: 1,
             experts_per_layer: 1,
             dtype: "raw".into(),
+            config: serde_json::Value::Null,
         };
         let mut w = PackWriter::create(&path, meta)?;
         let want = blob_for(0, 0, 8192);

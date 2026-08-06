@@ -8,5 +8,6 @@
 
 pub mod cache;
 pub mod pack;
+pub mod quant;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

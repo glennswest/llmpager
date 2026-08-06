@@ -82,6 +82,7 @@ dependencies = [
  "anyhow",
  "llmpager-core",
  "llmpager-cuda",
+ "serde_json",
 ]
 
 [[package]]

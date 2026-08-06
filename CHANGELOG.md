@@ -20,3 +20,5 @@
 - **feat:** `llmpager-bench pager` subcommand — M1 benchmark of the async pager with layer-ahead prefetch
 - **docs:** M1 pager benchmark results in docs/BENCHMARKS.md; M1 checked off in work plan
 - **docs:** Multi-model design section (DESIGN.md) + M5 milestone; M2 marked in progress
+- **feat:** `llmpager-core::quant` — q4g64 symmetric 4-bit groupwise quantization (scales-then-nibbles layout for GEMV streaming), reference dequant, error-bound tests
+- **feat:** PackMeta grows optional `config` JSON for runtime model params
