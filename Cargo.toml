@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/llmpager-core",
     "crates/llmpager-cuda",
+    "crates/llmpager-convert",
     "crates/llmpager-bench",
 ]
 

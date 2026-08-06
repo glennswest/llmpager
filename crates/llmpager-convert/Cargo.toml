@@ -1,0 +1,22 @@
+[package]
+name = "llmpager-convert"
+description = "Convert HF MoE checkpoints (Qwen3-MoE family) into .llmpk expert packs + a pageable resident core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+llmpager-core = { path = "../llmpager-core" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "llmpager-convert"
+path = "src/main.rs"

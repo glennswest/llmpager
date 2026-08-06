@@ -86,6 +86,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "llmpager-convert"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "llmpager-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "llmpager-core"
 version = "0.1.0"
 dependencies = [

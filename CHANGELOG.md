@@ -22,3 +22,4 @@
 - **docs:** Multi-model design section (DESIGN.md) + M5 milestone; M2 marked in progress
 - **feat:** `llmpager-core::quant` — q4g64 symmetric 4-bit groupwise quantization (scales-then-nibbles layout for GEMV streaming), reference dequant, error-bound tests
 - **feat:** PackMeta grows optional `config` JSON for runtime model params
+- **feat:** `llmpager-convert` — HF Qwen3-MoE checkpoint → q4g64 .llmpk pack + pageable resident-core safetensors; direct safetensors parsing (pread, no whole-shard loads), per-layer parallel quantization, end-to-end test with synthetic checkpoint
