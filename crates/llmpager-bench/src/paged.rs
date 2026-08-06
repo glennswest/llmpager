@@ -186,3 +186,8 @@ struct Worker {
     pin: crate::cuda::Pinned,
     stream: crate::cuda::CUstream,
 }
+
+// Safety: CUDA stream handles may be used from any thread that has the
+// context current (bind_thread), and each Worker is owned by one thread at a
+// time behind its Mutex.
+unsafe impl Send for Worker {}

@@ -16,7 +16,7 @@
 //! everywhere and read in whole aligned spans).
 
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -230,6 +230,7 @@ fn pread_full(file: &File, buf: &mut [u8], offset: u64) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
+        use std::io::Read;
         let mut f = file;
         f.seek(SeekFrom::Start(offset))?;
         f.read_exact(buf)?;
