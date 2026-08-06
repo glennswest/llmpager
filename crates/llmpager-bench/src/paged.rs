@@ -11,8 +11,9 @@ use anyhow::Result;
 use llmpager_core::cache::{ExpertCache, Lookup};
 use llmpager_core::pack::{PackReader, ALIGN};
 
-use crate::cuda::Cuda;
-use crate::{Flags, Rng};
+use llmpager_cuda::driver::Cuda;
+
+use crate::{route, Flags, Rng};
 
 pub fn run(f: &Flags) -> Result<()> {
     let path = f.path("path")?;
@@ -82,20 +83,7 @@ pub fn run(f: &Flags) -> Result<()> {
 
     for _tok in 0..tokens {
         for layer in 0..layers {
-            // Route: top-k distinct experts, skewed toward a per-layer hot set.
-            let mut chosen: Vec<u16> = Vec::with_capacity(topk);
-            while chosen.len() < topk.min(experts as usize) {
-                let e = if rng.unit() < hot_frac {
-                    // Hot set: spread deterministically across the id space.
-                    let h = rng.below(hot_size.min(experts));
-                    ((h * 2654435761 + layer as u64 * 97) % experts) as u16
-                } else {
-                    rng.below(experts) as u16
-                };
-                if !chosen.contains(&e) {
-                    chosen.push(e);
-                }
-            }
+            let chosen = route(&mut rng, layer, experts, topk, hot_frac, hot_size);
 
             // Cache pass: split hits from misses.
             let mut misses: Vec<(u16, u32)> = Vec::new(); // (expert, slot)
@@ -121,7 +109,7 @@ pub fn run(f: &Flags) -> Result<()> {
                         let worker = &workers[wi % io_threads];
                         let cuda = &cuda;
                         handles.push(sc.spawn(move || -> Result<u64> {
-                            cuda.bind_thread(true)?;
+                            cuda.bind_thread()?;
                             let mut w = worker.lock().unwrap();
                             let mut n = 0u64;
                             for (e, slot) in chunk {
@@ -183,8 +171,8 @@ pub fn run(f: &Flags) -> Result<()> {
 
 struct Worker {
     reader: PackReader,
-    pin: crate::cuda::Pinned,
-    stream: crate::cuda::CUstream,
+    pin: llmpager_cuda::driver::Pinned,
+    stream: llmpager_cuda::driver::CUstream,
 }
 
 // Safety: CUDA stream handles may be used from any thread that has the

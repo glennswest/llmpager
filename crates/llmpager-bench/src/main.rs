@@ -14,9 +14,9 @@ use anyhow::{bail, Context, Result};
 use llmpager_core::pack::{AlignedBuf, PackMeta, PackReader, PackWriter, ALIGN};
 
 #[cfg(feature = "cuda")]
-mod cuda;
-#[cfg(feature = "cuda")]
 mod paged;
+#[cfg(feature = "cuda")]
+mod pager_bench;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -29,8 +29,10 @@ fn main() -> Result<()> {
         "disk" => disk(&flags),
         #[cfg(feature = "cuda")]
         "paged" => paged::run(&flags),
+        #[cfg(feature = "cuda")]
+        "pager" => pager_bench::run(&flags),
         #[cfg(not(feature = "cuda"))]
-        "paged" => bail!("rebuild with --features cuda for the paged benchmark"),
+        "paged" | "pager" => bail!("rebuild with --features cuda for GPU benchmarks"),
         other => bail!("unknown subcommand {other}"),
     }
 }
@@ -104,6 +106,32 @@ impl Rng {
     pub fn unit(&mut self) -> f64 {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
+}
+
+/// Routing model shared by the GPU benchmarks: top-k distinct experts with
+/// `hot_frac` of picks drawn from a per-layer `hot_size` hot set.
+#[allow(dead_code)]
+pub fn route(
+    rng: &mut Rng,
+    layer: u16,
+    experts: u64,
+    topk: usize,
+    hot_frac: f64,
+    hot_size: u64,
+) -> Vec<u16> {
+    let mut chosen: Vec<u16> = Vec::with_capacity(topk);
+    while chosen.len() < topk.min(experts as usize) {
+        let e = if rng.unit() < hot_frac {
+            let h = rng.below(hot_size.min(experts));
+            ((h * 2654435761 + layer as u64 * 97) % experts) as u16
+        } else {
+            rng.below(experts) as u16
+        };
+        if !chosen.contains(&e) {
+            chosen.push(e);
+        }
+    }
+    chosen
 }
 
 fn gen(f: &Flags) -> Result<()> {

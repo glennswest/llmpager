@@ -9,11 +9,11 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 llmpager-core = { path = "../llmpager-core" }
-libloading = { version = "0.8", optional = true }
+llmpager-cuda = { path = "../llmpager-cuda", optional = true }
 
 [features]
 # CUDA path loads libcuda.so.1 at runtime — no toolkit needed on the box.
-cuda = ["dep:libloading"]
+cuda = ["dep:llmpager-cuda"]
 
 [[bin]]
 name = "llmpager-bench"

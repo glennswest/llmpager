@@ -80,8 +80,8 @@ name = "llmpager-bench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "libloading",
  "llmpager-core",
+ "llmpager-cuda",
 ]
 
 [[package]]
@@ -93,6 +93,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "llmpager-cuda"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libloading",
+ "llmpager-core",
 ]
 
 [[package]]

@@ -16,3 +16,5 @@
   end-to-end paged expert-fetch benchmark with skewed routing
 - **test:** Unit tests for cache eviction/pinning/decay and pack round-trip
 - **docs:** docs/BENCHMARKS.md — M0 results from ai.g8.lo (disk 4.3 GB/s O_DIRECT, pinned H2D 25.3 GB/s, paged-fetch hit-rate/slots scaling table); CLAUDE.md M0 checked off
+- **feat:** `llmpager-cuda` crate — CUDA driver wrapper (moved from bench, + events/stream-wait) and async Pager: io worker pool, O_DIRECT→pinned→VRAM fetch pipeline, per-slot CUDA-event readiness, condvar stall handling, best-effort prefetch, latency-histogram metrics
+- **feat:** `llmpager-bench pager` subcommand — M1 benchmark of the async pager with layer-ahead prefetch

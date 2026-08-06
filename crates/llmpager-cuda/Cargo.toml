@@ -1,0 +1,12 @@
+[package]
+name = "llmpager-cuda"
+description = "CUDA-side pager for llmpager: driver API wrapper, pinned staging, async expert fetches with event-based readiness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libloading = "0.8"
+llmpager-core = { path = "../llmpager-core" }
