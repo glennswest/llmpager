@@ -140,16 +140,8 @@ pub fn run(_f: &Flags) -> Result<()> {
         let (heads, kv_heads, hd, seq, max_seq) = (4usize, 2usize, 16usize, 9usize, 16usize);
         let scale = 1.0 / (hd as f32).sqrt();
         let q = rnd(heads * hd);
-        let mut k = vec![0f32; kv_heads * max_seq * hd];
-        let mut v = vec![0f32; kv_heads * max_seq * hd];
-        for kvh in 0..kv_heads {
-            for p in 0..seq {
-                for d in 0..hd {
-                    k[(kvh * max_seq + p) * hd + d] = (rng.unit() as f32 - 0.5) * 2.0;
-                    v[(kvh * max_seq + p) * hd + d] = (rng.unit() as f32 - 0.5) * 2.0;
-                }
-            }
-        }
+        let k = rnd(kv_heads * max_seq * hd);
+        let v = rnd(kv_heads * max_seq * hd);
         let mut want = vec![0f32; heads * hd];
         for h in 0..heads {
             let kvh = h / (heads / kv_heads);
