@@ -58,9 +58,12 @@ Version locations (must all match):
 - [x] Metrics: hit rate, bytes, fetch latency histogram
 
 ### M2 — Real model end-to-end (in progress)
-- [ ] `q4g64` quantization (symmetric 4-bit, group 64) in llmpager-core
-- [ ] Converter: HF Qwen3-30B-A3B safetensors → .llmpk expert pack (q4g64)
-      + resident core as a separate pageable safetensors file
+- [x] `q4g64` quantization (symmetric 4-bit, group 64) in llmpager-core
+- [x] Converter: HF Qwen3-MoE safetensors → .llmpk expert pack (q4g64)
+      + resident core as a separate pageable safetensors file (unit-tested
+      on synthetic checkpoint; real Qwen3-30B-A3B run pending download)
+- [ ] Run converter on Qwen3-30B-A3B on ai.g8.lo (checkpoint downloading
+      to ~/models/qwen3-30b-a3b; CUDA toolkit installing for the runtime)
 - [ ] Model runtime: attention/router resident, expert FFN via pager
 - [ ] Greedy decode CLI producing real tokens on ai.g8.lo
 - [ ] Perplexity sanity check vs reference
