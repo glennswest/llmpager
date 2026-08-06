@@ -5,8 +5,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+const KERNELS: &[&str] = &["q4g64", "decode"];
+
 fn main() {
-    println!("cargo:rerun-if-changed=kernels/q4g64.cu");
+    for k in KERNELS {
+        println!("cargo:rerun-if-changed=kernels/{k}.cu");
+    }
     println!("cargo:rerun-if-env-changed=NVCC");
     if std::env::var("CARGO_FEATURE_KERNELS").is_err() {
         return;
@@ -21,17 +25,16 @@ fn main() {
         "nvcc".to_string()
     });
 
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("q4g64.ptx");
-    let status = Command::new(&nvcc)
-        .args([
-            "--ptx",
-            "-O3",
-            "-arch=compute_80",
-            "kernels/q4g64.cu",
-            "-o",
-        ])
-        .arg(&out)
-        .status()
-        .unwrap_or_else(|e| panic!("running {nvcc}: {e} (set NVCC or install cuda-nvcc)"));
-    assert!(status.success(), "nvcc failed compiling kernels/q4g64.cu");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    for k in KERNELS {
+        let out = out_dir.join(format!("{k}.ptx"));
+        let status = Command::new(&nvcc)
+            .args(["--ptx", "-O3", "-arch=compute_80"])
+            .arg(format!("kernels/{k}.cu"))
+            .arg("-o")
+            .arg(&out)
+            .status()
+            .unwrap_or_else(|e| panic!("running {nvcc}: {e} (set NVCC or install cuda-nvcc)"));
+        assert!(status.success(), "nvcc failed compiling kernels/{k}.cu");
+    }
 }

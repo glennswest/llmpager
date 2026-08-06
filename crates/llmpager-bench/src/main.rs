@@ -15,6 +15,8 @@ use llmpager_core::pack::{AlignedBuf, PackMeta, PackReader, PackWriter, ALIGN};
 
 #[cfg(feature = "kernels")]
 mod gemv_bench;
+#[cfg(feature = "kernels")]
+mod kernels_bench;
 #[cfg(feature = "cuda")]
 mod paged;
 #[cfg(feature = "cuda")]
@@ -35,6 +37,8 @@ fn main() -> Result<()> {
         "pager" => pager_bench::run(&flags),
         #[cfg(feature = "kernels")]
         "gemv" => gemv_bench::run(&flags),
+        #[cfg(feature = "kernels")]
+        "kernels" => kernels_bench::run(&flags),
         #[cfg(not(feature = "cuda"))]
         "paged" | "pager" => bail!("rebuild with --features cuda for GPU benchmarks"),
         #[cfg(not(feature = "kernels"))]
