@@ -19,6 +19,8 @@ pub struct Kernels {
     bf16_gemv: CUfunction,
     silu_mul_f32: CUfunction,
     add_f32: CUfunction,
+    scale_add_f32: CUfunction,
+    kv_append_f32: CUfunction,
     rope_f32: CUfunction,
     attn_decode_f32: CUfunction,
     bf16_row_to_f32: CUfunction,
@@ -38,6 +40,8 @@ impl Kernels {
             bf16_gemv: cuda.function(de, "bf16_gemv")?,
             silu_mul_f32: cuda.function(de, "silu_mul_f32")?,
             add_f32: cuda.function(de, "add_f32")?,
+            scale_add_f32: cuda.function(de, "scale_add_f32")?,
+            kv_append_f32: cuda.function(de, "kv_append_f32")?,
             rope_f32: cuda.function(de, "rope_f32")?,
             attn_decode_f32: cuda.function(de, "attn_decode_f32")?,
             bf16_row_to_f32: cuda.function(de, "bf16_row_to_f32")?,
@@ -67,19 +71,59 @@ impl Kernels {
         )
     }
 
+    /// Row-wise RMSNorm over `rows` rows of length `n`; `w` shared per row.
+    #[allow(clippy::too_many_arguments)]
     pub fn rmsnorm(
         &self,
         cuda: &Cuda,
         x: CUdeviceptr,
         w: CUdeviceptr,
         y: CUdeviceptr,
+        rows: i32,
         n: i32,
         eps: f32,
         stream: CUstream,
     ) -> Result<()> {
         let (mut x, mut w, mut y, mut n, mut eps) = (x, w, y, n, eps);
         let mut p = params![x, w, y, n, eps];
-        cuda.launch(self.rmsnorm_f32, (1, 1, 1), (256, 1, 1), &mut p, stream)
+        cuda.launch(self.rmsnorm_f32, (rows as u32, 1, 1), (256, 1, 1), &mut p, stream)
+    }
+
+    /// a += s * b
+    pub fn scale_add(
+        &self,
+        cuda: &Cuda,
+        a: CUdeviceptr,
+        b: CUdeviceptr,
+        s: f32,
+        n: i32,
+        stream: CUstream,
+    ) -> Result<()> {
+        let (mut a, mut b, mut s_a, mut n_a) = (a, b, s, n);
+        let mut p = params![a, b, s_a, n_a];
+        cuda.launch(self.scale_add_f32, (grid_1d(n as usize, 256), 1, 1), (256, 1, 1), &mut p, stream)
+    }
+
+    /// Append this token's k/v ([kv_heads, head_dim]) to the caches at `pos`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_append(
+        &self,
+        cuda: &Cuda,
+        k: CUdeviceptr,
+        v: CUdeviceptr,
+        kcache: CUdeviceptr,
+        vcache: CUdeviceptr,
+        kv_heads: i32,
+        head_dim: i32,
+        pos: i32,
+        max_seq: i32,
+        stream: CUstream,
+    ) -> Result<()> {
+        let n = (kv_heads * head_dim) as usize;
+        let (mut k, mut v, mut kc, mut vc) = (k, v, kcache, vcache);
+        let (mut kvh, mut hd, mut pos_a, mut ms) = (kv_heads, head_dim, pos, max_seq);
+        let mut p = params![k, v, kc, vc, kvh, hd, pos_a, ms];
+        cuda.launch(self.kv_append_f32, (grid_1d(n, 256), 1, 1), (256, 1, 1), &mut p, stream)
     }
 
     /// y[rows] = W x, W bf16 [rows, cols].

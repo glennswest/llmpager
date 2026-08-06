@@ -35,6 +35,7 @@ pub struct Cuda {
     mem_host_free: unsafe extern "C" fn(*mut u8) -> CUresult,
     memcpy_htod_async: unsafe extern "C" fn(CUdeviceptr, *const u8, usize, CUstream) -> CUresult,
     memcpy_dtoh_async: unsafe extern "C" fn(*mut u8, CUdeviceptr, usize, CUstream) -> CUresult,
+    memset_d8_async: unsafe extern "C" fn(CUdeviceptr, u8, usize, CUstream) -> CUresult,
     stream_create: unsafe extern "C" fn(*mut CUstream, u32) -> CUresult,
     stream_sync: unsafe extern "C" fn(CUstream) -> CUresult,
     stream_wait_event: unsafe extern "C" fn(CUstream, CUevent, u32) -> CUresult,
@@ -87,6 +88,7 @@ impl Cuda {
                 mem_host_free: *lib.get(b"cuMemFreeHost")?,
                 memcpy_htod_async: *lib.get(b"cuMemcpyHtoDAsync_v2")?,
                 memcpy_dtoh_async: *lib.get(b"cuMemcpyDtoHAsync_v2")?,
+                memset_d8_async: *lib.get(b"cuMemsetD8Async")?,
                 stream_create: *lib.get(b"cuStreamCreate")?,
                 stream_sync: *lib.get(b"cuStreamSynchronize")?,
                 stream_wait_event: *lib.get(b"cuStreamWaitEvent")?,
@@ -152,6 +154,11 @@ impl Cuda {
                 (self.memcpy_htod_async)(dst, src.as_ptr(), src.len(), stream)
             )
         };
+        Ok(())
+    }
+
+    pub fn memset_async(&self, dst: CUdeviceptr, byte: u8, len: usize, stream: CUstream) -> Result<()> {
+        unsafe { cu!(cuMemsetD8Async, (self.memset_d8_async)(dst, byte, len, stream)) };
         Ok(())
     }
 

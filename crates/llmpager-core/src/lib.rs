@@ -9,5 +9,7 @@
 pub mod cache;
 pub mod pack;
 pub mod quant;
+#[cfg(unix)]
+pub mod st;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

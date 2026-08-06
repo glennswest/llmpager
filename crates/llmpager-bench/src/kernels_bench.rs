@@ -77,8 +77,60 @@ pub fn run(_f: &Flags) -> Result<()> {
         let want: Vec<f32> = x.iter().zip(&w).map(|(a, b)| a * inv * b).collect();
         let (dx, dw) = (g.up(f32s(&x))?, g.up(f32s(&w))?);
         let dy = g.cuda.alloc_device(n * 4)?;
-        g.kernels.rmsnorm(&cuda, dx, dw, dy, n as i32, eps, stream)?;
+        g.kernels.rmsnorm(&cuda, dx, dw, dy, 1, n as i32, eps, stream)?;
         check("rmsnorm", &g.down_f32(dy, n)?, &want, 1e-4)?;
+    }
+
+    // rmsnorm, multi-row (per-head q/k norm shape)
+    {
+        let (rows, n) = (8usize, 128usize);
+        let (x, w) = (rnd(rows * n), rnd(n));
+        let eps = 1e-6f32;
+        let mut want = vec![0f32; rows * n];
+        for r in 0..rows {
+            let xr = &x[r * n..(r + 1) * n];
+            let ms: f32 = xr.iter().map(|v| v * v).sum::<f32>() / n as f32;
+            let inv = 1.0 / (ms + eps).sqrt();
+            for i in 0..n {
+                want[r * n + i] = xr[i] * inv * w[i];
+            }
+        }
+        let (dx, dw) = (g.up(f32s(&x))?, g.up(f32s(&w))?);
+        let dy = g.cuda.alloc_device(rows * n * 4)?;
+        g.kernels.rmsnorm(&cuda, dx, dw, dy, rows as i32, n as i32, eps, stream)?;
+        check("rmsnorm_rows", &g.down_f32(dy, rows * n)?, &want, 1e-4)?;
+    }
+
+    // scale_add
+    {
+        let n = 500;
+        let (a, b) = (rnd(n), rnd(n));
+        let s = 0.375f32;
+        let want: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + s * y).collect();
+        let (da, db) = (g.up(f32s(&a))?, g.up(f32s(&b))?);
+        g.kernels.scale_add(&cuda, da, db, s, n as i32, stream)?;
+        check("scale_add", &g.down_f32(da, n)?, &want, 1e-5)?;
+    }
+
+    // kv_append
+    {
+        let (kv_heads, hd, max_seq, pos) = (4usize, 16usize, 8usize, 5usize);
+        let (k, v) = (rnd(kv_heads * hd), rnd(kv_heads * hd));
+        let (dk, dv) = (g.up(f32s(&k))?, g.up(f32s(&v))?);
+        let dkc = g.up(&vec![0u8; kv_heads * max_seq * hd * 4])?;
+        let dvc = g.up(&vec![0u8; kv_heads * max_seq * hd * 4])?;
+        g.kernels.kv_append(
+            &cuda, dk, dv, dkc, dvc,
+            kv_heads as i32, hd as i32, pos as i32, max_seq as i32, stream,
+        )?;
+        let kc = g.down_f32(dkc, kv_heads * max_seq * hd)?;
+        let mut want = vec![0f32; kv_heads * max_seq * hd];
+        for h in 0..kv_heads {
+            for d in 0..hd {
+                want[(h * max_seq + pos) * hd + d] = k[h * hd + d];
+            }
+        }
+        check("kv_append", &kc, &want, 1e-6)?;
     }
 
     // bf16_gemv

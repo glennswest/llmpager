@@ -9,12 +9,19 @@ fn arg(args: &[String], key: &str) -> Option<String> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(dir) = arg(&args, "gen-test") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir)?;
+        llmpager_convert::write_test_checkpoint(&dir)?;
+        println!("synthetic checkpoint written to {}", dir.display());
+        return Ok(());
+    }
     let (Some(model_dir), Some(out_pack), Some(out_core)) = (
         arg(&args, "model-dir"),
         arg(&args, "out-pack"),
         arg(&args, "out-core"),
     ) else {
-        bail!("usage: llmpager-convert --model-dir=DIR --out-pack=FILE.llmpk --out-core=FILE.safetensors");
+        bail!("usage: llmpager-convert --model-dir=DIR --out-pack=FILE.llmpk --out-core=FILE.safetensors  (or --gen-test=DIR)");
     };
 
     let t0 = std::time::Instant::now();

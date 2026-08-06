@@ -26,3 +26,7 @@
 - **docs:** Kimi-class (1T MoE) feasibility sizing in DESIGN.md; ai.g8.lo gained 800GB /data model store
 - **docs:** GEMV kernel bring-up results (correctness 5e-6, 35 GB/s naive) in BENCHMARKS.md
 - **feat:** Full decode kernel set (rmsnorm, bf16 GEMV, silu-mul, add, RoPE, GQA attention, embed gather) verified on GPU vs CPU references
+- **feat:** `llmpager-run` — decode runtime: core loader (bf16 matrices + f32 norms to VRAM), per-layer KV caches, host-side router top-k + greedy sampling, tokenizer via HF tokenizers, decode loop wiring kernels + pager
+- **feat:** kernels: multi-row rmsnorm (per-head q/k norm), kv_append, scale_add; driver memset
+- **feat:** `llmpager-convert --gen-test=DIR` — synthetic full checkpoint for GPU smoke tests
+- **feat:** `llmpager-core::st` — shared minimal safetensors reader

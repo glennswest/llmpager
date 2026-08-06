@@ -10,7 +10,10 @@ static __device__ __forceinline__ float bf16_to_f32(unsigned short h) {
     return __uint_as_float(b);
 }
 
-// y = x * rsqrt(mean(x^2) + eps) * w        (single block)
+// Row-wise RMSNorm: y[r] = x[r] * rsqrt(mean(x[r]^2) + eps) * w.
+// One block per row; w is shared across rows (per-head q/k norm reuses the
+// same head_dim weight for every head). rows=1 is the plain hidden-state
+// norm.
 extern "C" __global__ void rmsnorm_f32(
     const float* __restrict__ x,
     const float* __restrict__ w,
@@ -19,9 +22,11 @@ extern "C" __global__ void rmsnorm_f32(
     float eps)
 {
     __shared__ float red[256];
+    const float* xr = x + (size_t)blockIdx.x * n;
+    float* yr = y + (size_t)blockIdx.x * n;
     float acc = 0.f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
-        acc += x[i] * x[i];
+        acc += xr[i] * xr[i];
     }
     red[threadIdx.x] = acc;
     __syncthreads();
@@ -31,7 +36,43 @@ extern "C" __global__ void rmsnorm_f32(
     }
     const float inv = rsqrtf(red[0] / (float)n + eps);
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
-        y[i] = x[i] * inv * w[i];
+        yr[i] = xr[i] * inv * w[i];
+    }
+}
+
+// a += s * b
+extern "C" __global__ void scale_add_f32(
+    float* __restrict__ a,
+    const float* __restrict__ b,
+    float s,
+    int n)
+{
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        a[i] += s * b[i];
+    }
+}
+
+// Append the current token's k/v ([kv_heads, head_dim]) into the caches at
+// `pos`.
+extern "C" __global__ void kv_append_f32(
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    float* __restrict__ kcache,   // [kv_heads, max_seq, head_dim]
+    float* __restrict__ vcache,
+    int kv_heads,
+    int head_dim,
+    int pos,
+    int max_seq)
+{
+    const int total = kv_heads * head_dim;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total;
+         i += gridDim.x * blockDim.x) {
+        const int h = i / head_dim;
+        const int d = i % head_dim;
+        const size_t dst = ((size_t)h * max_seq + pos) * head_dim + d;
+        kcache[dst] = k[i];
+        vcache[dst] = v[i];
     }
 }
 

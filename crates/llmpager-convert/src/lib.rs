@@ -304,18 +304,35 @@ fn write_safetensors(ckpt: &Checkpoint, names: &[String], out: &Path) -> Result<
     Ok(8 + hdr.len() as u64 + copied)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use llmpager_core::pack::PackReader;
-    use llmpager_core::quant::q4g64_dequantize;
+/// Write a tiny synthetic Qwen3-MoE-shaped checkpoint with every tensor the
+/// runtime loads. Deterministic pseudo-random bf16 weights (seeded by tensor
+/// name), so decode output is arbitrary but reproducible. Used by tests and
+/// by `llmpager-convert --gen-test=DIR` for GPU smoke tests.
+pub fn write_test_checkpoint(dir: &Path) -> Result<()> {
+    let (layers, experts, hidden, inter) = (2usize, 8usize, 128usize, 64usize);
+    let (heads, kv_heads, head_dim, vocab) = (4usize, 2usize, 16usize, 128usize);
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "model_type": "qwen3_moe",
+            "num_hidden_layers": layers,
+            "num_experts": experts,
+            "hidden_size": hidden,
+            "moe_intermediate_size": inter,
+            "num_experts_per_tok": 2,
+            "num_attention_heads": heads,
+            "num_key_value_heads": kv_heads,
+            "head_dim": head_dim,
+            "vocab_size": vocab,
+            "norm_topk_prob": true,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 1000000.0,
+        }))?,
+    )?;
 
     fn bf16_bytes(vals: &[f32]) -> Vec<u8> {
-        vals.iter()
-            .flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes())
-            .collect()
+        vals.iter().flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes()).collect()
     }
-
     fn pseudo(n: usize, seed: u64) -> Vec<f32> {
         let mut s = seed.max(1);
         (0..n)
@@ -328,55 +345,61 @@ mod tests {
             .collect()
     }
 
-    /// Hand-rolled checkpoint: 2 layers x 4 experts, hidden 128, inter 64.
+    let mut header = serde_json::Map::new();
+    let mut data: Vec<u8> = Vec::new();
+    let mut add = |name: String, shape: Vec<usize>| {
+        let n: usize = shape.iter().product();
+        let seed = name.bytes().fold(1u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+        let bytes = bf16_bytes(&pseudo(n, seed));
+        let start = data.len();
+        data.extend_from_slice(&bytes);
+        header.insert(
+            name,
+            serde_json::json!({"dtype": "BF16", "shape": shape, "data_offsets": [start, start + bytes.len()]}),
+        );
+    };
+
+    add("model.embed_tokens.weight".into(), vec![vocab, hidden]);
+    add("lm_head.weight".into(), vec![vocab, hidden]);
+    add("model.norm.weight".into(), vec![hidden]);
+    for l in 0..layers {
+        let p = format!("model.layers.{l}");
+        add(format!("{p}.input_layernorm.weight"), vec![hidden]);
+        add(format!("{p}.post_attention_layernorm.weight"), vec![hidden]);
+        add(format!("{p}.self_attn.q_proj.weight"), vec![heads * head_dim, hidden]);
+        add(format!("{p}.self_attn.k_proj.weight"), vec![kv_heads * head_dim, hidden]);
+        add(format!("{p}.self_attn.v_proj.weight"), vec![kv_heads * head_dim, hidden]);
+        add(format!("{p}.self_attn.o_proj.weight"), vec![hidden, heads * head_dim]);
+        add(format!("{p}.self_attn.q_norm.weight"), vec![head_dim]);
+        add(format!("{p}.self_attn.k_norm.weight"), vec![head_dim]);
+        add(format!("{p}.mlp.gate.weight"), vec![experts, hidden]);
+        for e in 0..experts {
+            add(format!("{p}.mlp.experts.{e}.gate_proj.weight"), vec![inter, hidden]);
+            add(format!("{p}.mlp.experts.{e}.up_proj.weight"), vec![inter, hidden]);
+            add(format!("{p}.mlp.experts.{e}.down_proj.weight"), vec![hidden, inter]);
+        }
+    }
+
+    let mut hdr = serde_json::to_vec(&serde_json::Value::Object(header))?;
+    while hdr.len() % 8 != 0 {
+        hdr.push(b' ');
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&(hdr.len() as u64).to_le_bytes());
+    out.extend_from_slice(&hdr);
+    out.extend_from_slice(&data);
+    std::fs::write(dir.join("model.safetensors"), out)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llmpager_core::pack::PackReader;
+    use llmpager_core::quant::q4g64_dequantize;
+
     fn write_checkpoint(dir: &Path) -> Result<()> {
-        let (layers, experts, hidden, inter) = (2usize, 4usize, 128usize, 64usize);
-        std::fs::write(
-            dir.join("config.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "model_type": "qwen3_moe",
-                "num_hidden_layers": layers,
-                "num_experts": experts,
-                "hidden_size": hidden,
-                "moe_intermediate_size": inter,
-                "num_experts_per_tok": 2,
-            }))?,
-        )?;
-
-        let mut header = serde_json::Map::new();
-        let mut data: Vec<u8> = Vec::new();
-        let mut add = |name: String, shape: Vec<usize>, header: &mut serde_json::Map<String, serde_json::Value>, data: &mut Vec<u8>| {
-            let n: usize = shape.iter().product();
-            let seed = name.bytes().fold(1u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
-            let bytes = bf16_bytes(&pseudo(n, seed));
-            let start = data.len();
-            data.extend_from_slice(&bytes);
-            header.insert(
-                name,
-                serde_json::json!({"dtype": "BF16", "shape": shape, "data_offsets": [start, start + bytes.len()]}),
-            );
-        };
-
-        add("model.embed_tokens.weight".into(), vec![32, hidden], &mut header, &mut data);
-        for l in 0..layers {
-            add(format!("model.layers.{l}.mlp.gate.weight"), vec![experts, hidden], &mut header, &mut data);
-            for e in 0..experts {
-                add(format!("model.layers.{l}.mlp.experts.{e}.gate_proj.weight"), vec![inter, hidden], &mut header, &mut data);
-                add(format!("model.layers.{l}.mlp.experts.{e}.up_proj.weight"), vec![inter, hidden], &mut header, &mut data);
-                add(format!("model.layers.{l}.mlp.experts.{e}.down_proj.weight"), vec![hidden, inter], &mut header, &mut data);
-            }
-        }
-
-        let mut hdr = serde_json::to_vec(&serde_json::Value::Object(header))?;
-        while hdr.len() % 8 != 0 {
-            hdr.push(b' ');
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&(hdr.len() as u64).to_le_bytes());
-        out.extend_from_slice(&hdr);
-        out.extend_from_slice(&data);
-        std::fs::write(dir.join("model.safetensors"), out)?;
-        Ok(())
+        write_test_checkpoint(dir)
     }
 
     #[test]
@@ -386,8 +409,9 @@ mod tests {
         let pack_path = dir.path().join("m.llmpk");
         let core_path = dir.path().join("core.safetensors");
         let report = convert(dir.path(), &pack_path, &core_path)?;
-        assert_eq!((report.layers, report.experts), (2, 4));
-        assert_eq!(report.core_tensors, 3); // embed + 2 router gates
+        assert_eq!((report.layers, report.experts), (2, 8));
+        // embed + lm_head + final norm + 9 per-layer core tensors x 2 layers
+        assert_eq!(report.core_tensors, 21);
         assert!(report.max_quant_err < 0.05 / 14.0 * 1.2);
 
         // Pack sanity + dequant round-trip for one expert's gate_proj.
