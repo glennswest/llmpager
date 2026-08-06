@@ -1,0 +1,20 @@
+[package]
+name = "llmpager-bench"
+description = "M0 microbenchmarks: NVMe O_DIRECT reads, pinned H2D copies, end-to-end paged expert fetch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+llmpager-core = { path = "../llmpager-core" }
+libloading = { version = "0.8", optional = true }
+
+[features]
+# CUDA path loads libcuda.so.1 at runtime — no toolkit needed on the box.
+cuda = ["dep:libloading"]
+
+[[bin]]
+name = "llmpager-bench"
+path = "src/main.rs"
