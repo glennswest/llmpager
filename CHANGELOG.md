@@ -25,3 +25,4 @@
 - **feat:** `llmpager-convert` — HF Qwen3-MoE checkpoint → q4g64 .llmpk pack + pageable resident-core safetensors; direct safetensors parsing (pread, no whole-shard loads), per-layer parallel quantization, end-to-end test with synthetic checkpoint
 - **docs:** Kimi-class (1T MoE) feasibility sizing in DESIGN.md; ai.g8.lo gained 800GB /data model store
 - **docs:** GEMV kernel bring-up results (correctness 5e-6, 35 GB/s naive) in BENCHMARKS.md
+- **feat:** Full decode kernel set (rmsnorm, bf16 GEMV, silu-mul, add, RoPE, GQA attention, embed gather) verified on GPU vs CPU references

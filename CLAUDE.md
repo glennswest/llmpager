@@ -68,8 +68,12 @@ Version locations (must all match):
       driver JIT to sm_120); module load/launch via runtime-loaded libcuda
 - [x] `q4g64_gemv` kernel verified on GPU (rel err <6e-6; 35 GB/s naive —
       M3: batch per-layer launches + vectorize)
-- [ ] Remaining kernels: rmsnorm, rope, attention, silu-mul, router topk,
-      bf16 GEMV for core; decode loop wiring core + pager
+- [x] Decode kernel set verified on GPU (worst rel err 1.9e-6): rmsnorm,
+      bf16 GEMV, silu-mul, add, NeoX RoPE, GQA decode attention (f32 KV,
+      two-pass softmax), bf16 embed-row gather
+- [ ] Runtime crate: core loader (safetensors → VRAM), KV cache, host-side
+      router top-k + sampling, tokenizer (HF tokenizers crate), decode loop
+      wiring kernels + pager; real tokens on ai.g8.lo
 - [ ] Model runtime: attention/router resident, expert FFN via pager
 - [ ] Greedy decode CLI producing real tokens on ai.g8.lo
 - [ ] Perplexity sanity check vs reference
