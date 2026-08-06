@@ -71,12 +71,15 @@ Version locations (must all match):
 - [x] Decode kernel set verified on GPU (worst rel err 1.9e-6): rmsnorm,
       bf16 GEMV, silu-mul, add, NeoX RoPE, GQA decode attention (f32 KV,
       two-pass softmax), bf16 embed-row gather
-- [ ] Runtime crate: core loader (safetensors → VRAM), KV cache, host-side
-      router top-k + sampling, tokenizer (HF tokenizers crate), decode loop
-      wiring kernels + pager; real tokens on ai.g8.lo
-- [ ] Model runtime: attention/router resident, expert FFN via pager
-- [ ] Greedy decode CLI producing real tokens on ai.g8.lo
-- [ ] Perplexity sanity check vs reference
+- [x] Runtime crate `llmpager-run`: core loader (safetensors → VRAM), KV
+      cache, host-side router top-k + greedy sampling, tokenizer, decode
+      loop wiring kernels + pager
+- [x] End-to-end synthetic smoke test on GPU: gen-test checkpoint →
+      convert → decode produces deterministic tokens (61% cache hit on
+      8-expert toy)
+- [ ] Real tokens: run on converted Qwen3-30B-A3B / Qwen3-Coder packs
+      (downloads at 53GB/61GB and 19GB/31GB; convert watchers armed)
+- [ ] Perplexity/logits sanity check vs reference implementation
 
 ### M3 — Performance
 - [ ] Overlap tuning (double-buffering, per-layer prefetch depth)

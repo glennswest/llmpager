@@ -30,3 +30,4 @@
 - **feat:** kernels: multi-row rmsnorm (per-head q/k norm), kv_append, scale_add; driver memset
 - **feat:** `llmpager-convert --gen-test=DIR` — synthetic full checkpoint for GPU smoke tests
 - **feat:** `llmpager-core::st` — shared minimal safetensors reader
+- **test:** Full E2E smoke on GPU: synthetic checkpoint through converter and decode loop; deterministic tokens; all 10 kernels verified after additions
