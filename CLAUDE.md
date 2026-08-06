@@ -63,7 +63,13 @@ Version locations (must all match):
       + resident core as a separate pageable safetensors file (unit-tested
       on synthetic checkpoint; real Qwen3-30B-A3B run pending download)
 - [ ] Run converter on Qwen3-30B-A3B on ai.g8.lo (checkpoint downloading
-      to ~/models/qwen3-30b-a3b; CUDA toolkit installing for the runtime)
+      to ~/models/qwen3-30b-a3b; auto-convert watcher armed)
+- [x] Kernel toolchain: nvcc 13.3 on ai.g8.lo; build.rs .cu→PTX (compute_80,
+      driver JIT to sm_120); module load/launch via runtime-loaded libcuda
+- [x] `q4g64_gemv` kernel verified on GPU (rel err <6e-6; 35 GB/s naive —
+      M3: batch per-layer launches + vectorize)
+- [ ] Remaining kernels: rmsnorm, rope, attention, silu-mul, router topk,
+      bf16 GEMV for core; decode loop wiring core + pager
 - [ ] Model runtime: attention/router resident, expert FFN via pager
 - [ ] Greedy decode CLI producing real tokens on ai.g8.lo
 - [ ] Perplexity sanity check vs reference

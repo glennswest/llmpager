@@ -59,6 +59,25 @@ prefetch probes themselves — compare tok/s and wait ms/token, not hit rate.
 - Fetch latency distribution is tight: >99% of fetches complete under 2ms
   at prefetch 0 (0.7ms read + 0.12ms H2D); no tail beyond 5ms in any run.
 
+## M2 kernel bring-up — 2026-08-06, ai.g8.lo
+
+`q4g64_gemv` (warp-per-row, correctness-first), compute_80 PTX JIT'd by the
+driver onto Blackwell (sm_120). Verified against the CPU dequant reference.
+
+| Shape (rows×cols) | Worst rel err | us/launch | Weight throughput |
+|---|---|---|---|
+| 768×2048 (gate/up) | 5.2e-6 | 23.6 | 35.4 GB/s |
+| 2048×768 (down) | 1.8e-6 | 22.3 | 37.5 GB/s |
+
+Read-through: 35 GB/s is ~8% of this card's VRAM bandwidth and the launch
+cost (~23us) dominates at expert-sized matrices — a naive-kernel result,
+as expected. Decode implications: 48 layers × 8 experts × 3 GEMVs = 1,152
+launches ≈ 27ms/token if launched individually. M3 priorities are therefore
+(1) one launch per layer batching all top-k experts' three projections and
+(2) vectorized loads / half2 math to approach memory bandwidth. Correctness
+and the PTX toolchain (nvcc → PTX → driver JIT via runtime-loaded libcuda)
+are proven.
+
 ### Read-through for the design
 
 - The miss path costs ~0.7-1ms per 3MB expert (read) + ~0.12ms (H2D) —
