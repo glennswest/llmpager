@@ -36,6 +36,29 @@ from a 24-expert hot set. `tok/s` is the decode-loop ceiling from paging alone
 
 0 stalls in all runs.
 
+## M1 — 2026-08-06, ai.g8.lo (async pager)
+
+Same pack and routing skew as M0, through `llmpager-cuda`'s async Pager
+(4 io threads). `pager --prefetch=N` fetches layer L+N's experts while layer
+L runs, using whole-token routing as a perfect predictor (real models will
+use router heuristics, M3). Hit-rate rows with prefetch are inflated by the
+prefetch probes themselves — compare tok/s and wait ms/token, not hit rate.
+
+| Config | Wait ms/token | tok/s ceiling |
+|---|---|---|
+| 32 slots, prefetch 0 | 18.0 | 55.4 |
+| 32 slots, prefetch 1 | 12.7 | 78.4 |
+| 32 slots, prefetch 2 | 11.9 | 83.2 |
+| 48 slots, prefetch 1 | **8.8** | **113.2** |
+
+- prefetch 0 matches the M0 synchronous loop (55 vs 57 tok/s) — the pager's
+  bookkeeping adds nothing measurable.
+- One layer of prefetch buys +42% with zero extra bandwidth; depth 2 adds
+  little more. In a real decode the gain grows: compute per layer widens the
+  overlap window and prefetch waits vanish entirely once fetch < compute.
+- Fetch latency distribution is tight: >99% of fetches complete under 2ms
+  at prefetch 0 (0.7ms read + 0.12ms H2D); no tail beyond 5ms in any run.
+
 ### Read-through for the design
 
 - The miss path costs ~0.7-1ms per 3MB expert (read) + ~0.12ms (H2D) —

@@ -48,13 +48,14 @@ Version locations (must all match):
       end-to-end paged-fetch latency (libcuda loaded at runtime, no toolkit)
 - [x] Run M0 bench on ai.g8.lo, record numbers in docs/BENCHMARKS.md
 
-### M1 — Paging core, GPU-proven (in progress)
-- [ ] `llmpager-cuda` crate: driver wrapper (moved from bench) + CUDA events
-- [ ] Async Pager: io worker pool, miss → pread → H2D → event; hits and
+### M1 — Paging core, GPU-proven
+- [x] `llmpager-cuda` crate: driver wrapper (moved from bench) + CUDA events
+- [x] Async Pager: io worker pool, miss → pread → H2D → event; hits and
       in-flight slots share per-slot event readiness; condvar on stall
-- [ ] Prefetch hook (fire-and-forget fetch, pin released after fill)
-- [ ] Pager-based bench subcommand on ai.g8.lo vs M0 synchronous loop
-- [ ] Metrics: hit rate, bytes, fetch latency histogram
+- [x] Prefetch hook (fire-and-forget fetch, pin released after fill)
+- [x] Pager-based bench on ai.g8.lo: prefetch=1 +42% over sync loop;
+      48 slots + prefetch → 113 tok/s ceiling, 8.8 ms/token wait
+- [x] Metrics: hit rate, bytes, fetch latency histogram
 
 ### M2 — Real model end-to-end
 - [ ] Converter: HF Qwen3-30B-A3B (4-bit) → .llmpk expert pack + resident core
@@ -79,6 +80,9 @@ Version locations (must all match):
   ai.g8.lo operational. Language pivoted Python→Rust at user request before
   first commit. M0 complete: cache + pack + bench green on ai.g8.lo; results
   in docs/BENCHMARKS.md (H2D 25.3 GB/s, disk ~4 GB/s, 93% hit rate @ 48
-  slots → 104 tok/s paging ceiling). Next: M1 — pinned ring + copy-stream
-  pager as a proper crate (llmpager-cuda), event-based readiness instead of
-  per-miss stream sync, prefetch hook.
+  slots → 104 tok/s paging ceiling). M1 complete same day: llmpager-cuda
+  async pager, prefetch=1 gives +42% (113 tok/s ceiling @ 48 slots). Next:
+  M2 — converter (HF Qwen3-30B-A3B 4-bit → .llmpk + resident core) and the
+  model runtime. Open decision for M2: custom kernels vs candle for the
+  resident (non-expert) path — evaluate candle's quantized MoE support
+  first; the pager API (request/wait_stream/release) is runtime-agnostic.
