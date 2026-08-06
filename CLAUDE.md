@@ -40,13 +40,13 @@ Version locations (must all match):
 
 ### M0 — Scaffold & environment validation
 - [x] Probe ai.g8.lo (GPU, driver, Python, disk)
-- [ ] Repo scaffold: CLAUDE.md, README, CHANGELOG, .gitignore, pyproject
-- [ ] Create GitHub repo, first push
-- [ ] Core data structures: ExpertCache (aged LFU), pack format read/write
-- [ ] Unit tests (pure Python/numpy, runnable on Mac without CUDA)
-- [ ] Bench script: NVMe O_DIRECT read bandwidth, pinned H2D bandwidth,
-      end-to-end paged-fetch latency on ai.g8.lo
-- [ ] Run M0 bench on ai.g8.lo, record numbers in docs/BENCHMARKS.md
+- [x] Repo scaffold: CLAUDE.md, README, CHANGELOG, .gitignore, Cargo workspace
+- [x] Create GitHub repo, first push (github.com/glennswest/llmpager)
+- [x] Core data structures: ExpertCache (aged LFU), pack format read/write
+- [x] Unit tests (llmpager-core has no GPU deps; 8/8 green on macOS + Linux)
+- [x] Bench binary: O_DIRECT read bandwidth, pinned H2D bandwidth,
+      end-to-end paged-fetch latency (libcuda loaded at runtime, no toolkit)
+- [x] Run M0 bench on ai.g8.lo, record numbers in docs/BENCHMARKS.md
 
 ### M1 — Paging core, GPU-proven
 - [ ] Pinned host ring buffer + copy-stream pipeline (torch CUDA)
@@ -75,5 +75,9 @@ Version locations (must all match):
 
 - 2026-08-06: Recovered GPU passthrough on pve.g8.lo (Blackwell D3cold vfio
   bug — `vfio_pci.disable_idle_d3=1`), fixed guest DKMS kernel/header drift.
-  ai.g8.lo operational. M0 in progress: scaffolding repo, then cache + pack +
-  tests, then bench on ai.g8.lo.
+  ai.g8.lo operational. Language pivoted Python→Rust at user request before
+  first commit. M0 complete: cache + pack + bench green on ai.g8.lo; results
+  in docs/BENCHMARKS.md (H2D 25.3 GB/s, disk ~4 GB/s, 93% hit rate @ 48
+  slots → 104 tok/s paging ceiling). Next: M1 — pinned ring + copy-stream
+  pager as a proper crate (llmpager-cuda), event-based readiness instead of
+  per-miss stream sync, prefetch hook.

@@ -1,0 +1,50 @@
+# Benchmarks
+
+## M0 — 2026-08-06, ai.g8.lo
+
+Hardware: RTX 5060 Ti 16GB (vfio passthrough), 12 vCPU, 64GB RAM, virtio-scsi
+disk on NVMe-backed LVM. Driver 610.43.02 / CUDA 13.3, Debian 13, Rust 1.96.
+
+Synthetic pack: 24 layers × 64 experts × 3.0MB blobs (~4.6GB) — Qwen3-30B-A3B-ish
+expert geometry. All reads O_DIRECT.
+
+### Raw legs
+
+| Leg | Result |
+|---|---|
+| Pack write (buffered) | 2.75 GB/s |
+| Disk random expert read, 1 thread | 4.34 GB/s (0.69 ms/blob) |
+| Disk random expert read, 8 threads | 3.60 GB/s (aggregate) |
+| Pinned H2D copy (256MB × 20) | **25.32 GB/s** |
+
+Notes: single-threaded O_DIRECT already saturates the virtio-scsi path;
+8 threads slightly degrade aggregate throughput (queue contention through
+the single virtio-scsi device). H2D at 25.3 GB/s is near PCIe line rate for
+this slot — passthrough costs us nothing on the copy leg.
+
+### End-to-end paged fetch (cache → O_DIRECT pread → pinned → VRAM)
+
+500 tokens, top-8 of 64 experts/layer × 24 layers, routing skew: 80% of picks
+from a 24-expert hot set. `tok/s` is the decode-loop ceiling from paging alone
+(no model compute); real decode overlaps compute with fetch.
+
+| Slots/layer | VRAM cache | Hit rate | ms/token fetch | tok/s ceiling |
+|---|---|---|---|---|
+| 16 | 1.2 GB | 47.5% | 55.8 | 17.9 |
+| 32 | 2.3 GB | 87.9% | 17.5 | 57.0 |
+| 48 | 3.5 GB | 93.4% | 9.6 | 104.5 |
+
+0 stalls in all runs.
+
+### Read-through for the design
+
+- The miss path costs ~0.7-1ms per 3MB expert (read) + ~0.12ms (H2D) —
+  fetch is disk-bound, as expected. Priorities for M1/M3: hit rate and
+  read parallelism, not the copy engine.
+- Cache size is the dominant lever: tripling slots turned a 47% hit rate
+  into 93% and a 6× better ceiling. On 16GB VRAM there is room for a
+  40-50-slot cache per layer at this expert size alongside core + KV.
+- 8 io threads through one virtio-scsi queue don't beat 1 thread on raw
+  bandwidth; M1 should keep io parallelism modest and consider io_uring.
+  If disk becomes the wall later, NVMe passthrough or multiqueue
+  virtio would recover host-native performance.
