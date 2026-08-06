@@ -48,12 +48,13 @@ Version locations (must all match):
       end-to-end paged-fetch latency (libcuda loaded at runtime, no toolkit)
 - [x] Run M0 bench on ai.g8.lo, record numbers in docs/BENCHMARKS.md
 
-### M1 — Paging core, GPU-proven
-- [ ] Pinned host ring buffer + copy-stream pipeline (torch CUDA)
-- [ ] Async Pager: miss → pread → H2D → event; hit → tensor handle
-- [ ] Prefetch hook (issue fetches for layer L+1 while L computes)
-- [ ] Cache/pager integration test on ai.g8.lo with synthetic experts
-- [ ] Metrics: hit rate, bytes/token, fetch latency histogram
+### M1 — Paging core, GPU-proven (in progress)
+- [ ] `llmpager-cuda` crate: driver wrapper (moved from bench) + CUDA events
+- [ ] Async Pager: io worker pool, miss → pread → H2D → event; hits and
+      in-flight slots share per-slot event readiness; condvar on stall
+- [ ] Prefetch hook (fire-and-forget fetch, pin released after fill)
+- [ ] Pager-based bench subcommand on ai.g8.lo vs M0 synchronous loop
+- [ ] Metrics: hit rate, bytes, fetch latency histogram
 
 ### M2 — Real model end-to-end
 - [ ] Converter: HF Qwen3-30B-A3B (4-bit) → .llmpk expert pack + resident core
