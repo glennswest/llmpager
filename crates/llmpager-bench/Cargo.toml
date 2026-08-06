@@ -15,6 +15,8 @@ llmpager-cuda = { path = "../llmpager-cuda", optional = true }
 [features]
 # CUDA path loads libcuda.so.1 at runtime — no toolkit needed on the box.
 cuda = ["dep:llmpager-cuda"]
+# GPU kernels compiled from CUDA C at build time (needs nvcc).
+kernels = ["cuda", "llmpager-cuda/kernels"]
 
 [[bin]]
 name = "llmpager-bench"

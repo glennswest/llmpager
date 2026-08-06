@@ -10,6 +10,8 @@ type CUresult = i32;
 pub type CUdeviceptr = u64;
 pub type CUstream = *mut std::ffi::c_void;
 pub type CUevent = *mut std::ffi::c_void;
+pub type CUmodule = *mut std::ffi::c_void;
+pub type CUfunction = *mut std::ffi::c_void;
 type CUcontext = *mut std::ffi::c_void;
 
 /// Skip cross-device timing bookkeeping; we use events purely for ordering.
@@ -32,6 +34,7 @@ pub struct Cuda {
     mem_host_alloc: unsafe extern "C" fn(*mut *mut u8, usize, u32) -> CUresult,
     mem_host_free: unsafe extern "C" fn(*mut u8) -> CUresult,
     memcpy_htod_async: unsafe extern "C" fn(CUdeviceptr, *const u8, usize, CUstream) -> CUresult,
+    memcpy_dtoh_async: unsafe extern "C" fn(*mut u8, CUdeviceptr, usize, CUstream) -> CUresult,
     stream_create: unsafe extern "C" fn(*mut CUstream, u32) -> CUresult,
     stream_sync: unsafe extern "C" fn(CUstream) -> CUresult,
     stream_wait_event: unsafe extern "C" fn(CUstream, CUevent, u32) -> CUresult,
@@ -40,6 +43,19 @@ pub struct Cuda {
     event_sync: unsafe extern "C" fn(CUevent) -> CUresult,
     ctx_set: unsafe extern "C" fn(CUcontext) -> CUresult,
     ctx_sync: unsafe extern "C" fn() -> CUresult,
+    module_load_data: unsafe extern "C" fn(*mut CUmodule, *const u8) -> CUresult,
+    module_get_function:
+        unsafe extern "C" fn(*mut CUfunction, CUmodule, *const u8) -> CUresult,
+    #[allow(clippy::type_complexity)]
+    launch_kernel: unsafe extern "C" fn(
+        CUfunction,
+        u32, u32, u32, // grid
+        u32, u32, u32, // block
+        u32,           // shared mem bytes
+        CUstream,
+        *mut *mut std::ffi::c_void, // kernel params
+        *mut *mut std::ffi::c_void, // extra
+    ) -> CUresult,
 }
 
 impl Cuda {
@@ -70,6 +86,7 @@ impl Cuda {
                 mem_host_alloc: *lib.get(b"cuMemHostAlloc")?,
                 mem_host_free: *lib.get(b"cuMemFreeHost")?,
                 memcpy_htod_async: *lib.get(b"cuMemcpyHtoDAsync_v2")?,
+                memcpy_dtoh_async: *lib.get(b"cuMemcpyDtoHAsync_v2")?,
                 stream_create: *lib.get(b"cuStreamCreate")?,
                 stream_sync: *lib.get(b"cuStreamSynchronize")?,
                 stream_wait_event: *lib.get(b"cuStreamWaitEvent")?,
@@ -78,6 +95,9 @@ impl Cuda {
                 event_sync: *lib.get(b"cuEventSynchronize")?,
                 ctx_set,
                 ctx_sync: *lib.get(b"cuCtxSynchronize")?,
+                module_load_data: *lib.get(b"cuModuleLoadData")?,
+                module_get_function: *lib.get(b"cuModuleGetFunction")?,
+                launch_kernel: *lib.get(b"cuLaunchKernel")?,
                 lib,
             })
         }
@@ -135,6 +155,16 @@ impl Cuda {
         Ok(())
     }
 
+    pub fn dtoh_async(&self, dst: &mut [u8], src: CUdeviceptr, stream: CUstream) -> Result<()> {
+        unsafe {
+            cu!(
+                cuMemcpyDtoHAsync,
+                (self.memcpy_dtoh_async)(dst.as_mut_ptr(), src, dst.len(), stream)
+            )
+        };
+        Ok(())
+    }
+
     pub fn record_event(&self, e: CUevent, s: CUstream) -> Result<()> {
         unsafe { cu!(cuEventRecord, (self.event_record)(e, s)) };
         Ok(())
@@ -159,6 +189,60 @@ impl Cuda {
 
     pub fn sync(&self) -> Result<()> {
         unsafe { cu!(cuCtxSynchronize, (self.ctx_sync)()) };
+        Ok(())
+    }
+
+    /// Load a module from PTX text (must be NUL-terminated).
+    pub fn module_from_ptx(&self, ptx: &str) -> Result<CUmodule> {
+        let mut src = ptx.as_bytes().to_vec();
+        if src.last() != Some(&0) {
+            src.push(0);
+        }
+        let mut m: CUmodule = std::ptr::null_mut();
+        unsafe { cu!(cuModuleLoadData, (self.module_load_data)(&mut m, src.as_ptr())) };
+        Ok(m)
+    }
+
+    pub fn function(&self, module: CUmodule, name: &str) -> Result<CUfunction> {
+        let cname = std::ffi::CString::new(name)?;
+        let mut f: CUfunction = std::ptr::null_mut();
+        unsafe {
+            cu!(
+                cuModuleGetFunction,
+                (self.module_get_function)(&mut f, module, cname.as_ptr() as *const u8)
+            )
+        };
+        Ok(f)
+    }
+
+    /// Launch with raw kernel params: one pointer per kernel argument, each
+    /// pointing at the argument's value.
+    pub fn launch(
+        &self,
+        f: CUfunction,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        params: &mut [*mut std::ffi::c_void],
+        stream: CUstream,
+    ) -> Result<()> {
+        unsafe {
+            cu!(
+                cuLaunchKernel,
+                (self.launch_kernel)(
+                    f,
+                    grid.0,
+                    grid.1,
+                    grid.2,
+                    block.0,
+                    block.1,
+                    block.2,
+                    0,
+                    stream,
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                )
+            )
+        };
         Ok(())
     }
 }

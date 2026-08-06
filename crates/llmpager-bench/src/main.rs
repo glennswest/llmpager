@@ -13,6 +13,8 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use llmpager_core::pack::{AlignedBuf, PackMeta, PackReader, PackWriter, ALIGN};
 
+#[cfg(feature = "kernels")]
+mod gemv_bench;
 #[cfg(feature = "cuda")]
 mod paged;
 #[cfg(feature = "cuda")]
@@ -31,8 +33,12 @@ fn main() -> Result<()> {
         "paged" => paged::run(&flags),
         #[cfg(feature = "cuda")]
         "pager" => pager_bench::run(&flags),
+        #[cfg(feature = "kernels")]
+        "gemv" => gemv_bench::run(&flags),
         #[cfg(not(feature = "cuda"))]
         "paged" | "pager" => bail!("rebuild with --features cuda for GPU benchmarks"),
+        #[cfg(not(feature = "kernels"))]
+        "gemv" => bail!("rebuild with --features kernels (needs nvcc) for the gemv benchmark"),
         other => bail!("unknown subcommand {other}"),
     }
 }

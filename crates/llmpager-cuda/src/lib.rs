@@ -10,4 +10,6 @@
 //! host round-trips.
 
 pub mod driver;
+#[cfg(feature = "kernels")]
+pub mod kernels;
 pub mod pager;
