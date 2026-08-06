@@ -98,6 +98,31 @@ Making that first-class:
   bandwidth; the io pool stays global (few, deep readers) so one model's
   miss storm can't convoy-starve another's.
 
+## Kimi-class models (stretch)
+
+Could a 1T-class MoE (Kimi K2: 1T total / 32B active, 61 layers, 384
+experts/layer, 8+1 active) run this way on ai.g8.lo? Sizing:
+
+- **Pack**: ~550-600GB at q4 — fits the 800GB `/data` volume (added
+  2026-08-06 from the host's 990 EVO Plus; ~1.4TB still free on that NVMe
+  for a K3-scale ~1.4TB pack if ever needed).
+- **Per-expert blob**: ~22MB (3 × 2048×7168 q4). Worst-case per-token
+  traffic: 61 layers × 9 experts × 22MB ≈ 12GB → ~3s/token at measured
+  4 GB/s with zero cache hits.
+- **Caching**: 16GB VRAM affords only ~300 expert slots (~1.3% of 23k
+  experts); a **RAM tier** matters here — 64GB holds ~2,700 experts, and a
+  RAM hit costs a memcpy + H2D (~ms) instead of a disk read. Realistic
+  expectation with both tiers and routing locality: **0.5-1.5 tok/s** —
+  batch/offline territory, same class as the published
+  Kimi-on-tiny-GPU demos, not interactive chat.
+- **Code gaps**: shared-expert support, MLA attention, the RAM mid-tier
+  (VRAM → RAM → NVMe), and sparse embedding lookup (embed rows fetched
+  by token id rather than resident — at 160k vocab the table alone is
+  ~0.6GB q4).
+
+Qwen3-30B-A3B remains the proving model; Kimi-class is what the M5
+multi-tier work unlocks.
+
 ## Later
 
 - io_uring instead of thread pool preads
