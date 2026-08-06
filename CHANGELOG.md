@@ -19,3 +19,4 @@
 - **feat:** `llmpager-cuda` crate — CUDA driver wrapper (moved from bench, + events/stream-wait) and async Pager: io worker pool, O_DIRECT→pinned→VRAM fetch pipeline, per-slot CUDA-event readiness, condvar stall handling, best-effort prefetch, latency-histogram metrics
 - **feat:** `llmpager-bench pager` subcommand — M1 benchmark of the async pager with layer-ahead prefetch
 - **docs:** M1 pager benchmark results in docs/BENCHMARKS.md; M1 checked off in work plan
+- **docs:** Multi-model design section (DESIGN.md) + M5 milestone; M2 marked in progress

@@ -78,6 +78,26 @@ Rule of thumb targets on this hardware: NVMe ~3-7 GB/s, PCIe 5.0 x8 H2D
 ~25 GB/s pinned. At 8 active experts × ~3MB and an 80% hit rate, a token
 needs ~5MB from disk → sub-2ms fetch overhead per token if overlap works.
 
+## Multi-model (M5)
+
+Nothing in the pager is a singleton: each `Pager` owns its pack, VRAM slots,
+cache, and io workers, so N models already coexist within the VRAM budget.
+Making that first-class:
+
+- **VRAM budgeter** — slot counts become dynamic. A control loop grows the
+  active model's cache (hit rate rises with slots; see BENCHMARKS.md) and
+  shrinks idle models' caches by evicting lowest-frequency unpinned slots —
+  the aged-LFU structure already supports this.
+- **Pageable cores** — the resident core is stored as its own artifact (the
+  converter emits it separately from the pack, exactly so this works) and
+  can be unloaded for cold models. Reloading ~2GB of core at NVMe speed is
+  ~0.5s: model switch costs half a second, not a restart.
+- **Registry + routing** — serving maps `model:` in the request to a pager
+  instance; the budgeter decides which cores stay warm.
+- **Shared-disk discipline** — concurrent faulting models split NVMe
+  bandwidth; the io pool stays global (few, deep readers) so one model's
+  miss storm can't convoy-starve another's.
+
 ## Later
 
 - io_uring instead of thread pool preads

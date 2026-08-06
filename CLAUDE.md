@@ -57,8 +57,10 @@ Version locations (must all match):
       48 slots + prefetch → 113 tok/s ceiling, 8.8 ms/token wait
 - [x] Metrics: hit rate, bytes, fetch latency histogram
 
-### M2 — Real model end-to-end
-- [ ] Converter: HF Qwen3-30B-A3B (4-bit) → .llmpk expert pack + resident core
+### M2 — Real model end-to-end (in progress)
+- [ ] `q4g64` quantization (symmetric 4-bit, group 64) in llmpager-core
+- [ ] Converter: HF Qwen3-30B-A3B safetensors → .llmpk expert pack (q4g64)
+      + resident core as a separate pageable safetensors file
 - [ ] Model runtime: attention/router resident, expert FFN via pager
 - [ ] Greedy decode CLI producing real tokens on ai.g8.lo
 - [ ] Perplexity sanity check vs reference
@@ -72,6 +74,14 @@ Version locations (must all match):
 ### M4 — Serving
 - [ ] OpenAI-compatible HTTP endpoint
 - [ ] Deployment unit (systemd) on ai.g8.lo
+
+### M5 — Multi-model
+- [ ] Global VRAM budgeter: per-model expert-cache autosizing by activity
+      (busy models grow slots, idle models shrink toward zero)
+- [ ] Pageable resident cores: load/unload a model's core on demand
+      (~0.5s switch at 4 GB/s; N models installed, K warm)
+- [ ] Model registry; serving routes `model:` to the right pager instance
+- [ ] Disk-bandwidth arbitration between concurrently faulting models
 
 ## Session Log
 
