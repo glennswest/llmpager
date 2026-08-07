@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.10.0] — 2026-08-07
+
+### Added
+- SSE streaming (`"stream": true`) on /v1/completions and
+  /v1/chat/completions — OpenAI chunk format, token-by-token deltas,
+  final usage + tok/s chunk, [DONE] terminator. Generation runs on a
+  worker thread feeding a channel-backed chunked response.
+
 ## [v0.9.1] — 2026-08-07
 
 ### Changed
