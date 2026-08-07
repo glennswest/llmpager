@@ -1,7 +1,7 @@
 # Performance Journey
 
 The running story of how llmpager got faster, one technique at a time.
-Every number was measured on the same hardware; each section explains the
+Every number was measured on the same hardware in one ~10-hour session; each section explains the
 technique, why it works, and what it bought. BENCHMARKS.md holds the raw
 result tables; this file is the narrative.
 

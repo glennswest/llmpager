@@ -151,7 +151,7 @@
       <div class="stat"><h3>Lessons</h3><p class="sub">What the data taught us</p></div>
     </div>
     <p class="sub" style="margin-top:3vh">Everything in this deck is reproducible: numbers come from
-    <code>docs/BENCHMARKS.md</code> and <code>docs/PERFORMANCE.md</code> in the repo, measured on one machine over three days.</p>
+    <code>docs/BENCHMARKS.md</code> and <code>docs/PERFORMANCE.md</code> in the repo, measured on one machine in a single ~10-hour session.</p>
   </div>
   <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager</span><span class="counter"></span></div>
 </section>
@@ -260,7 +260,7 @@
     </table>
     <ul>
       <li><b>No CUDA toolkit at runtime</b> — the driver API is loaded from <code>libcuda.so.1</code>; kernels compile to PTX at build time and the driver JITs them onto Blackwell.</li>
-      <li>Apache-2.0 · <b>github.com/glennswest/llmpager</b> · 9 tagged releases in 3 days.</li>
+      <li>Apache-2.0 · <b>github.com/glennswest/llmpager</b> · 10 tagged releases in ~10 hours.</li>
     </ul>
   </div>
   <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Source</span><span class="counter"></span></div>
@@ -359,7 +359,7 @@ q4g64_gemv&lt;warp per row&gt;
 <!-- 10 · RESULTS HERO -->
 <section class="slide dark">
   <div class="grow" style="text-align:center">
-    <div class="kicker" style="margin-bottom:3vh">Results · 19:00 on day one</div>
+    <div class="kicker" style="margin-bottom:3vh">Results · hour eight, 19:00</div>
     <p style="font-size:3.2vh; color:#B8BBBE">"The capital of France is</p>
     <h1 style="font-size:7vh; margin:1.5vh 0"><span style="color:var(--rh-red)">Paris.</span> The capital of the United Kingdom is London..."</h1>
     <p class="sub" style="margin-top:3vh; font-size:2.4vh">
@@ -526,11 +526,11 @@ loaded qwen3-coder (24 slots) <span class="g">in 0.8s</span></pre>
       <div>
         <table>
           <tr><th>Milestone ladder</th><th class="num">Releases</th></tr>
-          <tr><td>M0 paging proof &rarr; M1 async pager</td><td class="num">day 1</td></tr>
-          <tr><td>M2 real tokens ("Paris.")</td><td class="num">day 1, hour 8</td></tr>
-          <tr><td>M3 perf: +89%</td><td class="num">day 2</td></tr>
-          <tr><td>M4 serving · M5 multi-model</td><td class="num">day 2–3</td></tr>
-          <tr><td><b>Total</b></td><td class="num"><b>9 tagged releases</b></td></tr>
+          <tr><td>M0 paging proof &rarr; M1 async pager</td><td class="num">hour 1&ndash;2</td></tr>
+          <tr><td>M2 real tokens ("Paris.")</td><td class="num">hour 3&ndash;8</td></tr>
+          <tr><td>M3 perf: +106%</td><td class="num">hour 8&ndash;9</td></tr>
+          <tr><td>M4 serving · M5 multi-model</td><td class="num">hour 9–10</td></tr>
+          <tr><td><b>Total</b></td><td class="num"><b>10 releases, one evening</b></td></tr>
         </table>
       </div>
     </div>
