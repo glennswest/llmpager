@@ -31,7 +31,8 @@ experts per layer from NVMe through a VRAM LFU cache.
 | 08-07 | M3: batched MoE launches | real decode | 34.8 tok/s |
 | 08-07 | (rejected) core q4 | real decode | 25.9 tok/s ✗ |
 | 08-07 | (rejected) cross-layer prefetch | real decode (cold prompt) | 10.8 vs 18.5 tok/s ✗ |
-| 08-07 | M3: RAM tier (page cache, `--direct=0`) | real decode | **37.6 tok/s** (32.2 on cold prompts) |
+| 08-07 | M3: RAM tier (page cache, `--direct=0`) | real decode | 37.6 tok/s (32.2 on cold prompts) |
+| 08-07 | M3: fp16 magic-number nibble unpack | real decode | **41.0 tok/s** |
 
 The gap between 33 tok/s real decode and the 113 tok/s paging ceiling is
 the remaining M3 headroom — the pager can already feed experts 3× faster
@@ -191,6 +192,16 @@ the expert-cache budget by warm count: a solo model runs 48 slots
 to load a whole 18.5GB model into serving rotation, because only the
 3.1GB core actually moves (experts page in on demand). Perplexity
 invariance (technique 12) is what makes resizing free of quality risk.
+
+### 14. fp16 magic-number nibble unpack (M3) — +9%
+
+The q4 GEMV was ALU-bound on dequantization (~5 instructions per weight:
+shift, mask, cast, subtract, FMA). The classic trick: OR each nibble into
+an fp16's mantissa at exponent 1024 (`| 0x6400`), subtract 1032
+(1024 + the zero-point 8) in `half2` — two exact dequantized values per
+three ALU ops. Kernel: 122 → 137.7 GB/s; decode: 37.6 → **41.0 tok/s**.
+Re-testing core-q4 with the faster kernel: still loses (35.2 vs 41.0) —
+the rejection survives its own fix. Total arc: 19.9 → 41.0 (+106%).
 
 ### Fixed along the way
 

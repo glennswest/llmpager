@@ -1,5 +1,14 @@
 # Changelog
 
+## [v0.9.1] — 2026-08-07
+
+### Changed
+- **perf:** fp16 magic-number nibble unpack in both q4 GEMV kernels
+  (122 → 137.7 GB/s); decode 37.6 → 41.0 tok/s (+106% total vs M2
+  baseline). Core-q4 re-tested with the faster kernel: still rejected
+  (35.2 vs 41.0)
+- docs: presentation and PERFORMANCE.md updated with new numbers
+
 ## [v0.9.0] — 2026-08-07
 
 M5 budgeter: warm-count-driven expert-cache sizing. Solo models run the

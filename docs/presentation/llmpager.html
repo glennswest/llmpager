@@ -348,7 +348,8 @@ q4g64_gemv&lt;warp per row&gt;
   scales: f16, streamed linearly
   data:   8&times;u32 nibble words / group
   x:      float4 pairs
-<span class="g">// 35 &rarr; 122 GB/s from vector loads alone</span></pre>
+<span class="g">// 35 &rarr; 122 GB/s from vector loads,</span>
+<span class="g">// &rarr; 138 GB/s from fp16 magic unpack</span></pre>
       </div>
     </div>
   </div>
@@ -377,14 +378,15 @@ q4g64_gemv&lt;warp per row&gt;
 <!-- 11 · SCOREBOARD -->
 <section class="slide red-strip">
   <div class="kicker">Results</div>
-  <h2>Decode speed: <span class="accent">19.9 &rarr; 37.6 tok/s</span> (+89%)</h2>
+  <h2>Decode speed: <span class="accent">19.9 &rarr; 41.0 tok/s</span> (+106%)</h2>
   <div class="grow">
     <div class="bar-chart">
-      <div class="bar-row"><div class="bar-label">M2 baseline (scalar kernels)</div><div class="bar-track"><div class="bar gray" style="width:35%">19.9</div></div></div>
-      <div class="bar-row"><div class="bar-label">+ vectorized GEMVs</div><div class="bar-track"><div class="bar" style="width:55%">31.1</div></div></div>
-      <div class="bar-row"><div class="bar-label">+ event-ring handle release</div><div class="bar-track"><div class="bar" style="width:58%">33.1</div></div></div>
-      <div class="bar-row"><div class="bar-label">+ batched MoE launches</div><div class="bar-track"><div class="bar" style="width:61%">34.8</div></div></div>
-      <div class="bar-row"><div class="bar-label">+ RAM tier (page cache)</div><div class="bar-track"><div class="bar" style="width:66%">37.6</div></div></div>
+      <div class="bar-row"><div class="bar-label">M2 baseline (scalar kernels)</div><div class="bar-track"><div class="bar gray" style="width:32%">19.9</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ vectorized GEMVs</div><div class="bar-track"><div class="bar" style="width:50%">31.1</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ event-ring handle release</div><div class="bar-track"><div class="bar" style="width:53%">33.1</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ batched MoE launches</div><div class="bar-track"><div class="bar" style="width:56%">34.8</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ RAM tier (page cache)</div><div class="bar-track"><div class="bar" style="width:60%">37.6</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ fp16 magic nibble unpack</div><div class="bar-track"><div class="bar" style="width:65%">41.0</div></div></div>
       <div class="bar-row"><div class="bar-label sub">paging ceiling (no compute)</div><div class="bar-track"><div class="bar dark" style="width:100%">113 tok/s — remaining headroom</div></div></div>
     </div>
     <ul>
@@ -545,7 +547,7 @@ loaded qwen3-coder (24 slots) <span class="g">in 0.8s</span></pre>
       <div>
         <h3>Near term</h3>
         <ul>
-          <li>Chase the ceiling: 37.6 measured vs 113 tok/s paged — q4-kernel ALU work, GPU router top-k, warm-start prefill.</li>
+          <li>Chase the ceiling: 41.0 measured vs 113 tok/s paged — GPU router top-k, warm-start prefill, fp16 KV.</li>
           <li>Budgeter v2: request-rate-weighted cache sizing.</li>
           <li>80B-A3B coder: same 3B active &rarr; same speed class, ~40 GB pack — a "needs 45 GB VRAM" model on 16 GB.</li>
         </ul>
