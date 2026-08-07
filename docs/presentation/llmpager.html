@@ -73,11 +73,23 @@
   pre .c { color: #8A8D90; }
   pre .g { color: #5BA352; }
   pre .r { color: #FF6B6B; }
+  .plain {
+    background: var(--rh-light); border-left: 6px solid var(--rh-gray);
+    padding: 1.2vh 2vh; margin: 1.6vh 0; font-size: 2.1vh; line-height: 1.5;
+  }
+  .plain b:first-child { color: var(--rh-red); }
+  .dark .plain { background: #212427; }
   .quote {
     border-left: 6px solid var(--rh-red); padding: 1vh 2.4vh; margin: 2vh 0;
     font-size: 2.7vh; font-style: italic; background: var(--rh-light);
   }
-  .dark .quote { background: #212427; }
+  .dark .plain {
+    background: var(--rh-light); border-left: 6px solid var(--rh-gray);
+    padding: 1.2vh 2vh; margin: 1.6vh 0; font-size: 2.1vh; line-height: 1.5;
+  }
+  .plain b:first-child { color: var(--rh-red); }
+  .dark .plain { background: #212427; }
+  .quote { background: #212427; }
   .footer {
     position: absolute; bottom: 0; left: 0; right: 0; height: 5vh;
     display: flex; align-items: center; justify-content: space-between;
@@ -169,6 +181,7 @@
           <li>Our card: RTX 5060 Ti, <b>16 GB VRAM</b>. The model: <b>18.5 GB</b> at 4-bit — before KV cache and activations.</li>
         </ul>
         <p class="quote">Expert routing is heavily skewed in practice.<br>Skew is what caches are for.</p>
+        <div class="plain"><b>In plain terms:</b> the model is 18.5&nbsp;GB of numbers; the graphics card holds 16&nbsp;GB. Normally that's game over — you buy a bigger GPU. But per word generated, the model only <i>uses</i> about a tenth of itself.</div>
       </div>
       <div>
         <table>
@@ -186,13 +199,32 @@
   <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Overview</span><span class="counter"></span></div>
 </section>
 
+
+<!-- 3b · VOCABULARY -->
+<section class="slide red-strip">
+  <div class="kicker">Overview</div>
+  <h2>The vocabulary, in plain terms</h2>
+  <div class="grow">
+    <table>
+      <tr><th style="width:22%">Term</th><th>What it means here</th></tr>
+      <tr><td><b>Token</b></td><td>A word-piece. Models read and write ~1 token at a time; "tok/s" is roughly writing speed. 40 tok/s is faster than most people read.</td></tr>
+      <tr><td><b>Weights</b></td><td>The billions of learned numbers that <i>are</i> the model. They must be somewhere the processor can reach to generate anything.</td></tr>
+      <tr><td><b>VRAM</b></td><td>The GPU's own fast memory — small (16&nbsp;GB here) but ~20&times; faster than main RAM for this work.</td></tr>
+      <tr><td><b>Mixture&nbsp;of&nbsp;Experts</b></td><td>Instead of one giant network, 128 small specialist networks ("experts") per layer. A "router" picks the best 8 for each token — so ~90% of the model sits idle at any moment.</td></tr>
+      <tr><td><b>Quantization (q4)</b></td><td>Storing weights with 4 bits instead of 16 — like compressing a photo. 4&times; smaller, tiny loss in fidelity (we measured it: slide on perplexity).</td></tr>
+      <tr><td><b>Paging / cache</b></td><td>The desk-and-filing-cabinet trick every OS uses: keep what you're using on the desk (VRAM), fetch the rest from the cabinet (disk) when asked, keep recently used items handy.</td></tr>
+    </table>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Overview</span><span class="counter"></span></div>
+</section>
+
 <!-- 4 · IDEA -->
 <section class="slide red-strip">
   <div class="kicker">Overview</div>
   <h2>The idea: treat experts like <span class="accent">pages</span></h2>
   <div class="grow">
     <ul>
-      <li>Keep the <b>shared core</b> resident in VRAM: embeddings, attention, router, norms, KV cache.</li>
+      <li>Keep the <b>shared core</b> resident in VRAM: embeddings, attention, router, norms, and the KV cache (the model's running notes on the conversation so far).</li>
       <li><b>Stream routed experts from NVMe on demand</b>; cache the hot ones in VRAM with an aged-LFU, per layer.</li>
       <li>Inspired by turbo-fieldfare (Apple Silicon / Metal); rebuilt for Linux + CUDA, then taken further: multi-model serving with a VRAM budgeter.</li>
     </ul>
@@ -208,6 +240,7 @@
       <div class="node">Expert FFN<small>batched q4 GEMV</small></div>
     </div>
     <p class="sub">Hits cost nothing. Misses overlap with compute. The disk only ever sees what the cache can't hold.</p>
+    <div class="plain"><b>In plain terms:</b> a small desk and a big filing cabinet. The always-needed pages stay on the desk; specialists are fetched from the cabinet only when called, and the ones called often just stay out. The trick is fetching the next folder <i>while</i> you're still reading the current one.</div>
   </div>
   <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Overview</span><span class="counter"></span></div>
 </section>
@@ -239,6 +272,7 @@
           <tr><td>Expert fetch latency (99%)</td><td class="num">&lt; 2 ms</td></tr>
         </table>
         <p class="sub">Every design decision traces back to these four numbers.</p>
+        <div class="plain"><b>In plain terms:</b> these are the speed limits of each road — GPU memory is a motorway (448), the GPU-to-computer link a main road (25), the disk a side street (4.3). The whole design is about keeping traffic off the side street.</div>
       </div>
     </div>
   </div>
@@ -262,6 +296,7 @@
       <li><b>No CUDA toolkit at runtime</b> — the driver API is loaded from <code>libcuda.so.1</code>; kernels compile to PTX at build time and the driver JITs them onto Blackwell.</li>
       <li>Apache-2.0 · <b>github.com/glennswest/llmpager</b> · 10 tagged releases in ~5 hours.</li>
     </ul>
+    <div class="plain"><b>In plain terms:</b> five building blocks — a file format, a librarian that moves weights, a converter that repackages downloaded models, a runner that generates text, and a web server that answers requests like any AI API.</div>
   </div>
   <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Source</span><span class="counter"></span></div>
 </section>
@@ -284,11 +319,12 @@
       </div>
       <div>
         <ul>
-          <li><b>Everything is 4096-byte aligned</b> so every read is O_DIRECT-legal: aligned offset, aligned pinned buffer, aligned span.</li>
+          <li><b>Everything is 4096-byte aligned</b> so every read can use O_DIRECT — reads that bypass the OS's file cache — with aligned offset, buffer, and length as the disk requires.</li>
           <li>One blob per (layer, expert): the unit of paging, ~2.5 MB for this model.</li>
           <li>The resident core ships separately as ordinary safetensors — <b>pageable as one artifact</b>, which is what makes 0.8 s model switching possible later.</li>
           <li>Converter reads HF shards directly with <code>pread</code> — no 4 GB shard ever loaded whole; 48&times;128 experts quantized in parallel: <b>21 seconds</b>.</li>
         </ul>
+        <div class="plain"><b>In plain terms:</b> a carefully organized archive where every expert sits at a known position, sized in disk-friendly chunks — so any expert can be grabbed with one clean read, no unpacking.</div>
       </div>
     </div>
   </div>
@@ -318,6 +354,7 @@
           <tr><td>Stalls observed, all runs</td><td class="num">0</td></tr>
         </table>
         <p class="sub">The ceiling means: the pager can feed experts 3&times; faster than the compute currently consumes them.</p>
+        <div class="plain"><b>In plain terms:</b> a team of librarians. Ask for 8 folders; whatever's on the desk is handed over instantly, the rest arrive from the cabinet in under 2&nbsp;ms — while the GPU keeps working on something else. Nobody ever stands around waiting.</div>
       </div>
     </div>
   </div>
@@ -332,7 +369,7 @@
     <div class="cols">
       <div>
         <ul>
-          <li>q4g64 GEMV (single + <b>batched across top-k experts</b>)</li>
+          <li>q4g64 GEMV — matrix&times;vector multiply, <i>the</i> operation of generating a token (single + <b>batched across top-k experts</b>)</li>
           <li>bf16 GEMV (vectorized <code>uint4</code> loads)</li>
           <li>RMSNorm (row-batched for per-head q/k norm)</li>
           <li>NeoX RoPE · GQA decode attention · KV append</li>
@@ -340,6 +377,7 @@
         </ul>
         <p class="quote">Worst relative error across the whole set: <b>1.9e-6</b>.<br>
         Correctness first made every optimization a pure perf diff.</p>
+        <div class="plain"><b>In plain terms:</b> "kernels" are the small programs that run on the GPU and do the actual arithmetic. Each one was checked against a slow-but-trusted CPU version to parts-per-million agreement before we made anything fast.</div>
       </div>
       <div>
 <pre><span class="c">// build.rs: nvcc &rarr; PTX (compute_80),</span>
@@ -393,6 +431,7 @@ q4g64_gemv&lt;warp per row&gt;
       <li>Vectorized loads: q4 GEMV 35 &rarr; 122 GB/s; bf16 GEMV to ~VRAM bandwidth. <b>+56% alone.</b></li>
       <li>RAM tier: pack (15.4 GB) fits in RAM (64 GB) — misses become memory copies. Cold prompts: <b>20.4 &rarr; 32.2 tok/s.</b></li>
     </ul>
+    <div class="plain"><b>In plain terms:</b> 41 tokens/second is ~30 words a second — comfortably faster than you read. Each bar is one specific engineering change; nothing here is a bigger GPU or a smaller model.</div>
   </div>
   <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Results</span><span class="counter"></span></div>
 </section>
@@ -419,6 +458,7 @@ q4g64_gemv&lt;warp per row&gt;
           <li>Warm workloads plateau at 48 slots; cold workloads keep paying for misses.</li>
           <li>Conclusion that shaped the roadmap: <b>make misses cheaper, not just rarer</b> — which is exactly what the RAM tier did.</li>
         </ul>
+        <div class="plain"><b>In plain terms:</b> a bigger desk means fewer trips to the filing cabinet — but past a point, extra desk space barely helps. The better move was making each trip 6&times; faster.</div>
       </div>
     </div>
   </div>
@@ -446,6 +486,7 @@ q4g64_gemv&lt;warp per row&gt;
           <li>This invariance is what makes the VRAM budgeter safe — resizing a live model's cache carries zero quality risk.</li>
           <li>The q4-core row prices an earlier rejected experiment: +4.5% PPL was the quality tax, on top of being slower in decode.</li>
         </ul>
+        <div class="plain"><b>In plain terms:</b> perplexity measures how "surprised" the model is by real text — lower is better, and it's exquisitely sensitive to any corruption. Identical scores at different cache sizes means paging changes <i>when</i> weights arrive, never the answers.</div>
       </div>
     </div>
   </div>
@@ -472,6 +513,7 @@ loaded qwen3-30b-a3b (48 slots) in 2.4s
 <span class="r">budgeter: qwen3-30b-a3b 48 &rarr; 24 slots</span>
 loaded qwen3-coder (24 slots) <span class="g">in 0.8s</span></pre>
         <p class="quote" style="font-size:2.3vh"><b>0.8 seconds</b> to bring an 18.5 GB model into rotation — only the 3.1 GB core moves; experts page themselves in.</p>
+        <div class="plain"><b>In plain terms:</b> like two apps sharing your laptop's memory — the one you're using gets more, the idle one shrinks, and switching is instant because most of each app was never "loaded" in the old sense to begin with.</div>
       </div>
     </div>
   </div>
