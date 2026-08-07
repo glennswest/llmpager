@@ -122,8 +122,16 @@ impl Pager {
         let layers = meta.num_layers;
         let total_slots = layers as usize * cfg.slots_per_layer as usize;
 
-        let dev_slots: Vec<CUdeviceptr> =
-            (0..total_slots).map(|_| cuda.alloc_device(span)).collect::<Result<_>>()?;
+        // One arena per layer, sliced into slots: thousands of individual
+        // ~2.5MB cuMemAllocs each round up to the allocation granularity
+        // (~2MB steps), wasting up to ~60% of the cache budget.
+        let mut dev_slots: Vec<CUdeviceptr> = Vec::with_capacity(total_slots);
+        for _ in 0..layers {
+            let base = cuda.alloc_device(cfg.slots_per_layer as usize * span)?;
+            for s in 0..cfg.slots_per_layer {
+                dev_slots.push(base + s as u64 * span as u64);
+            }
+        }
         let events: Vec<CUevent> = (0..total_slots).map(|_| cuda.event()).collect::<Result<_>>()?;
 
         let shared = Arc::new(Shared {
