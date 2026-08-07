@@ -64,6 +64,7 @@ fn main() -> Result<()> {
         max_seq,
         core_q4,
     )?;
+    dec.prefetch_next = arg(&args, "prefetch-next").as_deref() != Some("0");
 
     // Prefill: feed prompt tokens; logits of the last one seed generation.
     eprintln!("prefill: {} tokens", prompt_ids.len());

@@ -46,6 +46,8 @@ pub struct Decoder {
     core: CoreWeights,
     pager: Pager,
     max_seq: usize,
+    /// Speculative prefetch: warm layer L+1 with layer L's expert ids.
+    pub prefetch_next: bool,
     // Device buffers.
     h: CUdeviceptr,
     h_norm: CUdeviceptr,
@@ -153,6 +155,7 @@ impl Decoder {
             core,
             pager,
             max_seq,
+            prefetch_next: true,
         })
     }
 
@@ -215,6 +218,11 @@ impl Decoder {
             // Paged expert FFNs — one batched launch per projection stage.
             let ids: Vec<u16> = picks.iter().map(|p| p.0).collect();
             let handles = self.pager.request(l as u16, &ids)?;
+            if self.prefetch_next && l + 1 < c.layers {
+                // Cross-layer id reuse is a heuristic; prefetch is
+                // best-effort and never blocks.
+                self.pager.prefetch((l + 1) as u16, &ids);
+            }
             for handle in &handles {
                 self.pager.wait_stream(handle, st)?;
             }
