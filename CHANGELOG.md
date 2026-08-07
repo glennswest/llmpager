@@ -1,5 +1,27 @@
 # Changelog
 
+## [v0.4.0] — 2026-08-07
+
+Decode 33.1 → ~34.8 tok/s; two heuristics measured and rejected with data.
+
+### Added
+- Batched MoE: one q4 GEMV launch per projection stage for all top-k
+  experts (device blob-pointer array), all-expert silu-mul, weighted
+  `moe_reduce` into the residual
+- Prefill skips final norm / lm_head / logits readback for non-final
+  prompt tokens
+- Flags: `--core-dtype=q4|bf16`, `--prefetch-next=1|0` (both default to
+  the measured-faster setting)
+- docs/PERFORMANCE.md — the performance journey, technique by technique,
+  including a session-transcript timeline appendix
+
+### Changed
+- Core q4 experiment rejected: 25.9 vs 33.1 tok/s (q4 GEMV is unpack-ALU
+  bound) plus greedy drift; core stays bf16 by default
+- Cross-layer speculative prefetch rejected: 18.5 → 10.8 tok/s on cold
+  prompts — Qwen3 routing is uncorrelated across layers, wrong prefetch
+  pollutes the cache and triples disk traffic
+
 ## [v0.3.0] — 2026-08-07
 
 Decode 19.9 → 33.1 tok/s (+66%) on Qwen3-30B-A3B.
