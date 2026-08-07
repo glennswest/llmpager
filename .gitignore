@@ -52,3 +52,8 @@ docs/presentation/segs/
 docs/presentation/concat.txt
 docs/presentation/*.mp4
 docs/presentation/voice/
+
+# Voice source material — never public
+docs/presentation/voice*/
+docs/presentation/*.wav
+docs/presentation/*.m4a
