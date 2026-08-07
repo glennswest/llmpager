@@ -172,3 +172,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **docs:** Red Hat-styled HTML presentation (docs/presentation/llmpager.html) — overview, source, results, lessons learned
 - **fix:** timeline corrected — ai.g8.lo was on UTC; the whole project ran in one ~5-hour session (first tokens at hour 3); VM timezone set to America/Chicago
 - **refactor:** presentation pipeline moved to the new gmedia project (github.com/glennswest/gmedia); docs/presentation now carries only gmedia.conf + narration
+- **docs:** Final narrated video produced with own-voice clone (F5-TTS, pop-filtered reference, per-clip polish), all-calm register, 13m32s; deck quote-box CSS repaired; narration tuned for synthesis. Voice source material purged from git history and gitignored — video ships via release/YouTube only
