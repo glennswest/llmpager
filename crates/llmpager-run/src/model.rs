@@ -92,6 +92,23 @@ fn f32_bytes(v: &[f32]) -> &[u8] {
 }
 
 impl CoreWeights {
+    /// Every device allocation this core holds (deduplicated — lm_head may
+    /// alias the embedding table when weights are tied).
+    pub fn device_ptrs(&self) -> Vec<CUdeviceptr> {
+        let mut v = vec![self.embed, self.final_norm, self.lm_head.dev];
+        for l in &self.layers {
+            v.extend([
+                l.input_ln, l.q.dev, l.k.dev, l.v.dev, l.o.dev,
+                l.q_norm, l.k_norm, l.post_ln, l.router.dev,
+            ]);
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+}
+
+impl CoreWeights {
     pub fn load(
         cuda: &Cuda,
         core_path: &Path,

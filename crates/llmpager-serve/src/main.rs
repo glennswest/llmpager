@@ -1,12 +1,15 @@
-//! Minimal OpenAI-compatible HTTP server over the llmpager decode runtime.
+//! OpenAI-compatible HTTP server over the llmpager decode runtime, with a
+//! multi-model registry (M5).
 //!
 //! Endpoints:
 //!   GET  /v1/models
-//!   POST /v1/completions        {"prompt": "...", "max_tokens": N}
-//!   POST /v1/chat/completions   {"messages": [{role, content}...], "max_tokens": N}
+//!   POST /v1/completions        {"model": "...", "prompt": "...", "max_tokens": N}
+//!   POST /v1/chat/completions   {"model": "...", "messages": [...], "max_tokens": N}
 //!
-//! One model, greedy decode, requests served serially (the decoder owns the
-//! GPU). Multi-model routing is the M5 milestone.
+//! Models come from a JSON config. Up to `max_warm` models stay loaded;
+//! requesting a cold model evicts the least-recently-used warm one (its
+//! Decoder drop returns the VRAM) and loads the new one (~seconds).
+//! Greedy decode, requests served serially.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -19,46 +22,115 @@ fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter().find_map(|a| a.strip_prefix(&format!("--{key}=")).map(String::from))
 }
 
+#[derive(Clone)]
+struct ModelSpec {
+    name: String,
+    pack: PathBuf,
+    core: PathBuf,
+    tokenizer: PathBuf,
+    slots: u32,
+    io_threads: usize,
+    direct: bool,
+}
+
 struct Engine {
     dec: Decoder,
     tok: tokenizers::Tokenizer,
-    model_name: String,
 }
 
-impl Engine {
-    fn generate(&mut self, prompt: &str, max_tokens: usize) -> Result<(String, usize, usize, f64)> {
-        let ids = self
-            .tok
-            .encode(prompt, false)
-            .map_err(|e| anyhow::anyhow!("encode: {e}"))?
-            .get_ids()
-            .to_vec();
-        if ids.is_empty() {
-            bail!("empty prompt after tokenization");
+struct Registry {
+    specs: Vec<ModelSpec>,
+    max_warm: usize,
+    /// Most-recently-used first.
+    warm: Vec<(String, Engine)>,
+}
+
+impl Registry {
+    fn spec(&self, name: &str) -> Result<&ModelSpec> {
+        self.specs
+            .iter()
+            .find(|s| s.name == name)
+            .with_context(|| format!("unknown model {name}"))
+    }
+
+    /// Warm the named model, evicting LRU entries as needed, and move it to
+    /// the front. Returns its index in `warm` (always 0).
+    fn warm_up(&mut self, name: &str) -> Result<usize> {
+        if let Some(i) = self.warm.iter().position(|(n, _)| n == name) {
+            let e = self.warm.remove(i);
+            self.warm.insert(0, e);
+            return Ok(0);
+        }
+        let spec = self.spec(name)?.clone();
+        while self.warm.len() >= self.max_warm.max(1) {
+            let (evicted, engine) = self.warm.pop().unwrap();
+            drop(engine);
+            eprintln!("evicted model {evicted}");
         }
         let t0 = Instant::now();
-        let mut next = 0u32;
-        for (pos, id) in ids.iter().enumerate() {
-            next = self.dec.step(*id, pos, pos + 1 == ids.len())?;
-        }
-        let mut out_ids: Vec<u32> = Vec::new();
-        for i in 0..max_tokens {
-            if self.dec.cfg.eos.contains(&next) {
-                break;
+        let load = |spec: &ModelSpec| -> Result<Engine> {
+            let tok_file = if spec.tokenizer.is_dir() {
+                spec.tokenizer.join("tokenizer.json")
+            } else {
+                spec.tokenizer.clone()
+            };
+            let tok = tokenizers::Tokenizer::from_file(&tok_file)
+                .map_err(|e| anyhow::anyhow!("loading {}: {e}", tok_file.display()))?;
+            let dec = Decoder::new(
+                &spec.pack, &spec.core, spec.slots, spec.io_threads, 4096, false, spec.direct,
+            )?;
+            Ok(Engine { dec, tok })
+        };
+        let engine = match load(&spec) {
+            Ok(e) => e,
+            Err(first_err) => {
+                // Likely VRAM pressure: drop everything warm and retry once.
+                if self.warm.is_empty() {
+                    return Err(first_err);
+                }
+                eprintln!("load of {name} failed ({first_err:#}); evicting all warm models and retrying");
+                self.warm.clear();
+                load(&spec)?
             }
-            out_ids.push(next);
-            let pos = ids.len() + i;
-            if pos + 1 >= 4096 {
-                break;
-            }
-            next = self.dec.step(next, pos, true)?;
-        }
-        let text = self
-            .tok
-            .decode(&out_ids, true)
-            .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
-        Ok((text, ids.len(), out_ids.len(), t0.elapsed().as_secs_f64()))
+        };
+        eprintln!("loaded model {name} in {:.1}s", t0.elapsed().as_secs_f64());
+        self.warm.insert(0, (name.to_string(), engine));
+        Ok(0)
     }
+}
+
+fn generate(engine: &mut Engine, prompt: &str, max_tokens: usize) -> Result<(String, usize, usize, f64)> {
+    let ids = engine
+        .tok
+        .encode(prompt, false)
+        .map_err(|e| anyhow::anyhow!("encode: {e}"))?
+        .get_ids()
+        .to_vec();
+    if ids.is_empty() {
+        bail!("empty prompt after tokenization");
+    }
+    let t0 = Instant::now();
+    let mut next = 0u32;
+    for (pos, id) in ids.iter().enumerate() {
+        next = engine.dec.step(*id, pos, pos + 1 == ids.len())?;
+    }
+    let mut out_ids: Vec<u32> = Vec::new();
+    for i in 0..max_tokens {
+        if engine.dec.cfg.eos.contains(&next) {
+            break;
+        }
+        out_ids.push(next);
+        let pos = ids.len() + i;
+        if pos + 1 >= 4096 {
+            break;
+        }
+        next = engine.dec.step(next, pos, true)?;
+    }
+    let text = engine
+        .tok
+        .decode(&out_ids, true)
+        .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+    Ok((text, ids.len(), out_ids.len(), t0.elapsed().as_secs_f64()))
 }
 
 /// Qwen3 ChatML-style template.
@@ -84,45 +156,41 @@ fn json_response(status: u32, v: &serde_json::Value) -> tiny_http::Response<std:
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (Some(pack), Some(core), Some(tokenizer)) =
-        (arg(&args, "pack"), arg(&args, "core"), arg(&args, "tokenizer"))
-    else {
-        bail!(
-            "usage: llmpager-serve --pack=F.llmpk --core=F.core.safetensors --tokenizer=DIR \
-             [--port=8090] [--slots=48] [--io-threads=4] [--direct=0|1] [--model-name=NAME]"
-        );
+    let Some(config_path) = arg(&args, "config") else {
+        bail!("usage: llmpager-serve --config=serve.json  (see deploy/serve.json)");
     };
-    let port: u16 = arg(&args, "port").and_then(|v| v.parse().ok()).unwrap_or(8090);
-    let slots: u32 = arg(&args, "slots").and_then(|v| v.parse().ok()).unwrap_or(48);
-    let io_threads: usize = arg(&args, "io-threads").and_then(|v| v.parse().ok()).unwrap_or(4);
-    let direct = arg(&args, "direct").as_deref() != Some("0");
-    let model_name = arg(&args, "model-name").unwrap_or_else(|| {
-        PathBuf::from(&pack)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "llmpager".into())
-    });
+    let cfg: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).context("reading config")?)?;
+    let port = cfg["port"].as_u64().unwrap_or(8090) as u16;
+    let max_warm = cfg["max_warm"].as_u64().unwrap_or(2) as usize;
+    let specs: Vec<ModelSpec> = cfg["models"]
+        .as_array()
+        .context("config: models[]")?
+        .iter()
+        .map(|m| {
+            Ok(ModelSpec {
+                name: m["name"].as_str().context("model name")?.to_string(),
+                pack: PathBuf::from(m["pack"].as_str().context("model pack")?),
+                core: PathBuf::from(m["core"].as_str().context("model core")?),
+                tokenizer: PathBuf::from(m["tokenizer"].as_str().context("model tokenizer")?),
+                slots: m["slots"].as_u64().unwrap_or(32) as u32,
+                io_threads: m["io_threads"].as_u64().unwrap_or(4) as usize,
+                direct: m["direct"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect::<Result<_>>()?;
+    if specs.is_empty() {
+        bail!("config: at least one model required");
+    }
+    let default_model = specs[0].name.clone();
+    let registry = Mutex::new(Registry { specs, max_warm, warm: Vec::new() });
 
-    let tok_path = {
-        let p = PathBuf::from(&tokenizer);
-        if p.is_dir() { p.join("tokenizer.json") } else { p }
-    };
-    let tok = tokenizers::Tokenizer::from_file(&tok_path)
-        .map_err(|e| anyhow::anyhow!("loading {}: {e}", tok_path.display()))?;
-    let dec = Decoder::new(
-        &PathBuf::from(&pack),
-        &PathBuf::from(&core),
-        slots,
-        io_threads,
-        4096,
-        false,
-        direct,
-    )?;
-    let engine = Mutex::new(Engine { dec, tok, model_name: model_name.clone() });
+    // Warm the default model up front so the first request is fast.
+    registry.lock().unwrap().warm_up(&default_model)?;
 
     let server = tiny_http::Server::http(("0.0.0.0", port))
         .map_err(|e| anyhow::anyhow!("bind :{port}: {e}"))?;
-    eprintln!("llmpager-serve: {model_name} on :{port}");
+    eprintln!("llmpager-serve: {} model(s), default {default_model}, :{port}", registry.lock().unwrap().specs.len());
 
     for mut req in server.incoming_requests() {
         let url = req.url().to_string();
@@ -130,8 +198,7 @@ fn main() -> Result<()> {
         let mut body = String::new();
         use std::io::Read;
         let _ = req.as_reader().read_to_string(&mut body);
-
-        let resp = handle(&engine, &method, &url, &body);
+        let resp = handle(&registry, &default_model, &method, &url, &body);
         let _ = match resp {
             Ok(v) => req.respond(json_response(200, &v)),
             Err(e) => req.respond(json_response(
@@ -144,53 +211,59 @@ fn main() -> Result<()> {
 }
 
 fn handle(
-    engine: &Mutex<Engine>,
+    registry: &Mutex<Registry>,
+    default_model: &str,
     method: &str,
     url: &str,
     body: &str,
 ) -> Result<serde_json::Value> {
     match (method, url) {
         ("GET", "/v1/models") => {
-            let name = engine.lock().unwrap().model_name.clone();
-            Ok(serde_json::json!({
-                "object": "list",
-                "data": [{"id": name, "object": "model", "owned_by": "llmpager"}]
-            }))
+            let r = registry.lock().unwrap();
+            let data: Vec<_> = r
+                .specs
+                .iter()
+                .map(|s| {
+                    let warm = r.warm.iter().any(|(n, _)| n == &s.name);
+                    serde_json::json!({"id": s.name, "object": "model",
+                                        "owned_by": "llmpager", "warm": warm})
+                })
+                .collect();
+            Ok(serde_json::json!({"object": "list", "data": data}))
         }
-        ("POST", "/v1/completions") => {
+        ("POST", "/v1/completions") | ("POST", "/v1/chat/completions") => {
+            let chat = url == "/v1/chat/completions";
             let req: serde_json::Value = serde_json::from_str(body).context("bad JSON")?;
-            let prompt = req["prompt"].as_str().context("missing prompt")?.to_string();
-            let max_tokens = req["max_tokens"].as_u64().unwrap_or(128) as usize;
-            let mut e = engine.lock().unwrap();
-            let (text, p_toks, c_toks, secs) = e.generate(&prompt, max_tokens)?;
-            Ok(serde_json::json!({
-                "id": "cmpl-llmpager",
-                "object": "text_completion",
-                "model": e.model_name,
-                "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": p_toks, "completion_tokens": c_toks,
-                           "total_tokens": p_toks + c_toks},
-                "llmpager": {"seconds": secs, "tok_per_sec": c_toks as f64 / secs.max(1e-9)}
-            }))
-        }
-        ("POST", "/v1/chat/completions") => {
-            let req: serde_json::Value = serde_json::from_str(body).context("bad JSON")?;
-            let messages = req["messages"].as_array().context("missing messages")?;
-            let max_tokens = req["max_tokens"].as_u64().unwrap_or(256) as usize;
-            let prompt = chat_prompt(messages);
-            let mut e = engine.lock().unwrap();
-            let (text, p_toks, c_toks, secs) = e.generate(&prompt, max_tokens)?;
-            Ok(serde_json::json!({
-                "id": "chatcmpl-llmpager",
-                "object": "chat.completion",
-                "model": e.model_name,
-                "choices": [{"index": 0,
-                              "message": {"role": "assistant", "content": text},
-                              "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": p_toks, "completion_tokens": c_toks,
-                           "total_tokens": p_toks + c_toks},
-                "llmpager": {"seconds": secs, "tok_per_sec": c_toks as f64 / secs.max(1e-9)}
-            }))
+            let model = req["model"].as_str().unwrap_or(default_model).to_string();
+            let max_tokens =
+                req["max_tokens"].as_u64().unwrap_or(if chat { 256 } else { 128 }) as usize;
+            let prompt = if chat {
+                chat_prompt(req["messages"].as_array().context("missing messages")?)
+            } else {
+                req["prompt"].as_str().context("missing prompt")?.to_string()
+            };
+
+            let mut r = registry.lock().unwrap();
+            r.warm_up(&model)?;
+            let engine = &mut r.warm[0].1;
+            let (text, p_toks, c_toks, secs) = generate(engine, &prompt, max_tokens)?;
+            let usage = serde_json::json!({"prompt_tokens": p_toks,
+                "completion_tokens": c_toks, "total_tokens": p_toks + c_toks});
+            let perf = serde_json::json!({"seconds": secs,
+                "tok_per_sec": c_toks as f64 / secs.max(1e-9)});
+            Ok(if chat {
+                serde_json::json!({
+                    "id": "chatcmpl-llmpager", "object": "chat.completion", "model": model,
+                    "choices": [{"index": 0,
+                                  "message": {"role": "assistant", "content": text},
+                                  "finish_reason": "stop"}],
+                    "usage": usage, "llmpager": perf})
+            } else {
+                serde_json::json!({
+                    "id": "cmpl-llmpager", "object": "text_completion", "model": model,
+                    "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
+                    "usage": usage, "llmpager": perf})
+            })
         }
         _ => bail!("no such endpoint: {method} {url}"),
     }

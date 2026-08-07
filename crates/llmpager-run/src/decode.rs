@@ -332,6 +332,31 @@ fn top_k_softmax(logits: &[f32], k: usize, renorm: bool) -> Vec<(u16, f32)> {
     probs
 }
 
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        // Model unloading (M5): return every device allocation. The pager
+        // frees its own arenas in its Drop (which runs after this body).
+        let _ = self.cuda.sync();
+        let mut ptrs = vec![
+            self.h, self.h_norm, self.q, self.k, self.v, self.attn_out,
+            self.proj_out, self.router_logits, self.gate_out, self.up_out,
+            self.act_out, self.expert_out, self.d_expert_ptrs,
+            self.d_expert_wts, self.logits, self.attn_scratch,
+        ];
+        ptrs.extend(&self.kcache);
+        ptrs.extend(&self.vcache);
+        ptrs.extend(self.core.device_ptrs());
+        ptrs.sort_unstable();
+        ptrs.dedup();
+        for p in ptrs {
+            self.cuda.free_device(p);
+        }
+        for e in &self.release_events {
+            self.cuda.destroy_event(*e);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::top_k_softmax;

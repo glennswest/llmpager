@@ -105,6 +105,7 @@ pub struct Pager {
     index: PackReader,
     tx: Option<Sender<Job>>,
     workers: Vec<std::thread::JoinHandle<()>>,
+    arenas: Vec<CUdeviceptr>,
 }
 
 fn open_reader(path: &Path, direct: bool) -> Result<PackReader> {
@@ -127,9 +128,11 @@ impl Pager {
         // One arena per layer, sliced into slots: thousands of individual
         // ~2.5MB cuMemAllocs each round up to the allocation granularity
         // (~2MB steps), wasting up to ~60% of the cache budget.
+        let mut arenas: Vec<CUdeviceptr> = Vec::with_capacity(layers as usize);
         let mut dev_slots: Vec<CUdeviceptr> = Vec::with_capacity(total_slots);
         for _ in 0..layers {
             let base = cuda.alloc_device(cfg.slots_per_layer as usize * span)?;
+            arenas.push(base);
             for s in 0..cfg.slots_per_layer {
                 dev_slots.push(base + s as u64 * span as u64);
             }
@@ -168,7 +171,7 @@ impl Pager {
             }));
         }
 
-        Ok(Self { cuda, shared, index, tx: Some(tx), workers })
+        Ok(Self { cuda, shared, index, tx: Some(tx), workers, arenas })
     }
 
     /// Acquire pinned handles for `experts` of `layer`, dispatching fetches
@@ -295,6 +298,13 @@ impl Drop for Pager {
         self.tx.take(); // close the channel; workers drain and exit
         for w in self.workers.drain(..) {
             let _ = w.join();
+        }
+        // Model unloading (M5) reclaims the VRAM this pager held.
+        for a in self.arenas.drain(..) {
+            self.cuda.free_device(a);
+        }
+        for e in &self.shared.events {
+            self.cuda.destroy_event(*e);
         }
     }
 }

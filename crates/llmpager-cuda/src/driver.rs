@@ -43,6 +43,7 @@ pub struct Cuda {
     event_record: unsafe extern "C" fn(CUevent, CUstream) -> CUresult,
     event_sync: unsafe extern "C" fn(CUevent) -> CUresult,
     event_query: unsafe extern "C" fn(CUevent) -> CUresult,
+    event_destroy: unsafe extern "C" fn(CUevent) -> CUresult,
     ctx_set: unsafe extern "C" fn(CUcontext) -> CUresult,
     ctx_sync: unsafe extern "C" fn() -> CUresult,
     module_load_data: unsafe extern "C" fn(*mut CUmodule, *const u8) -> CUresult,
@@ -97,6 +98,7 @@ impl Cuda {
                 event_record: *lib.get(b"cuEventRecord")?,
                 event_sync: *lib.get(b"cuEventSynchronize")?,
                 event_query: *lib.get(b"cuEventQuery")?,
+                event_destroy: *lib.get(b"cuEventDestroy_v2")?,
                 ctx_set,
                 ctx_sync: *lib.get(b"cuCtxSynchronize")?,
                 module_load_data: *lib.get(b"cuModuleLoadData")?,
@@ -183,6 +185,10 @@ impl Cuda {
     pub fn sync_event(&self, e: CUevent) -> Result<()> {
         unsafe { cu!(cuEventSynchronize, (self.event_sync)(e)) };
         Ok(())
+    }
+
+    pub fn destroy_event(&self, e: CUevent) {
+        unsafe { (self.event_destroy)(e) };
     }
 
     /// Non-blocking: has the event completed? (CUDA_ERROR_NOT_READY => false)
