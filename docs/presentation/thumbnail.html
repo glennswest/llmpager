@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Red Hat Display", "Inter", "Helvetica Neue", Arial, sans-serif; }
+  .thumb {
+    width: 1280px; height: 720px; position: relative; overflow: hidden;
+    background: #151515; color: #fff; display: none;
+  }
+  .thumb.active { display: block; }
+  .strip { position: absolute; left: 0; top: 0; bottom: 0; width: 18px; background: #EE0000; }
+
+  /* Variant A: the squeeze */
+  .va .big { position: absolute; left: 70px; top: 60px; font-size: 96px; font-weight: 900; line-height: 1.05; }
+  .va .big .red { color: #EE0000; }
+  .va .modelbox {
+    position: absolute; left: 70px; top: 340px; width: 560px; height: 260px;
+    background: #EE0000; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; font-weight: 900;
+  }
+  .va .modelbox .n { font-size: 110px; }
+  .va .modelbox .l { font-size: 40px; }
+  .va .arrow { position: absolute; left: 660px; top: 420px; font-size: 130px; font-weight: 900; color: #fff; }
+  .va .gpubox {
+    position: absolute; left: 830px; top: 390px; width: 350px; height: 160px;
+    background: #fff; color: #151515; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; font-weight: 900;
+  }
+  .va .gpubox .n { font-size: 68px; }
+  .va .gpubox .l { font-size: 30px; }
+  .va .badge {
+    position: absolute; right: 60px; top: 60px; background: #EE0000; color: #fff;
+    font-size: 54px; font-weight: 900; padding: 18px 34px; transform: rotate(4deg);
+  }
+  .va .wordmark { position: absolute; left: 70px; bottom: 34px; font-size: 40px; font-weight: 900; color: #B8BBBE; }
+
+  /* Variant B: the statement */
+  .vb { text-align: left; }
+  .vb .l1 { position: absolute; left: 80px; top: 90px; font-size: 150px; font-weight: 900; }
+  .vb .l2 { position: absolute; left: 80px; top: 265px; font-size: 150px; font-weight: 900; color: #EE0000; }
+  .vb .l3 { position: absolute; left: 80px; top: 470px; font-size: 64px; font-weight: 700; color: #fff; }
+  .vb .l3 b { color: #EE0000; }
+  .vb .wordmark { position: absolute; left: 80px; bottom: 34px; font-size: 40px; font-weight: 900; color: #B8BBBE; }
+  .vb .chip {
+    position: absolute; right: -40px; top: -40px; width: 420px; height: 420px;
+    border: 24px solid #EE0000; transform: rotate(12deg); opacity: 0.35;
+  }
+</style>
+</head>
+<body>
+
+<div class="thumb va" id="t1">
+  <div class="strip"></div>
+  <div class="big">The model is<br><span class="red">BIGGER</span> than the GPU</div>
+  <div class="modelbox"><div class="n">18.5 GB</div><div class="l">MODEL</div></div>
+  <div class="arrow">&rarr;</div>
+  <div class="gpubox"><div class="n">16 GB</div><div class="l">GPU</div></div>
+  <div class="badge">41 tok/s</div>
+  <div class="wordmark">llmpager</div>
+</div>
+
+<div class="thumb vb" id="t2">
+  <div class="strip"></div>
+  <div class="chip"></div>
+  <div class="l1">TOO BIG?</div>
+  <div class="l2">PAGE IT.</div>
+  <div class="l3">30B model &middot; 16GB GPU &middot; <b>41 tok/s</b></div>
+  <div class="wordmark">llmpager</div>
+</div>
+
+<script>
+  const n = parseInt(location.hash.slice(1) || "1", 10);
+  document.querySelectorAll(".thumb")[n - 1].classList.add("active");
+</script>
+</body>
+</html>
