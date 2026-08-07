@@ -78,6 +78,34 @@ launches ≈ 27ms/token if launched individually. M3 priorities are therefore
 and the PTX toolchain (nvcc → PTX → driver JIT via runtime-loaded libcuda)
 are proven.
 
+## M2 — first real-model decode — 2026-08-07, ai.g8.lo
+
+Qwen3-30B-A3B (48 layers, 128 experts top-8), converted in 21s to a
+15.43GB q4g64 pack + 3.08GB bf16 resident core. Greedy decode via
+`llmpager-run`, all weights beyond the core paged from NVMe.
+
+> "The capital of France is **Paris. The capital of the United Kingdom is
+> London. The capital of Germany is Berlin. ..."**
+
+| Metric | 48 slots | 64 slots |
+|---|---|---|
+| Decode tok/s | 19.9 | 19.0 |
+| Expert cache hit | 83.4% | 83.9% |
+| Prefill tok/s | 8.0 | 7.6 |
+
+Notes:
+- Coherent completions on factual and code prompts — converter, pack
+  format, kernels, router, and pager agree end-to-end.
+- Real routing is flatter than the synthetic 80/20 benchmark: going from
+  48 to 64 slots buys almost no hit rate. The M3 lever is prefetch +
+  faster GEMVs, not more cache.
+- ~19 tok/s with naive (35 GB/s) GEMV kernels and a per-layer stream
+  sync; the M1 paging ceiling at this hit rate was ~113 tok/s, so compute,
+  not paging, is the current bottleneck — as expected pre-M3.
+- Pager slot buffers must be per-layer arenas: individual ~2.5MB
+  cuMemAllocs round up to allocation granularity and waste ~60% VRAM
+  (found as OOM at 64 slots; fixed).
+
 ### Read-through for the design
 
 - The miss path costs ~0.7-1ms per 3MB expert (read) + ~0.12ms (H2D) —

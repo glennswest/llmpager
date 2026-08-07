@@ -77,8 +77,10 @@ Version locations (must all match):
 - [x] End-to-end synthetic smoke test on GPU: gen-test checkpoint →
       convert → decode produces deterministic tokens (61% cache hit on
       8-expert toy)
-- [ ] Real tokens: run on converted Qwen3-30B-A3B / Qwen3-Coder packs
-      (downloads at 53GB/61GB and 19GB/31GB; convert watchers armed)
+- [x] Real tokens on ai.g8.lo: Qwen3-30B-A3B converted (21s; 15.4GB pack
+      + 3.1GB core) and decoding coherently at ~19 tok/s greedy, 83%
+      expert-cache hit (numbers in docs/BENCHMARKS.md)
+- [ ] Qwen3-Coder-30B-A3B pack (download in progress, watcher armed)
 - [ ] Perplexity/logits sanity check vs reference implementation
 
 ### M3 — Performance
@@ -101,6 +103,13 @@ Version locations (must all match):
 
 ## Session Log
 
+- 2026-08-07: **First real tokens.** Qwen3-30B-A3B decodes coherently at
+  ~19 tok/s greedy (83% cache hit) with experts paged from NVMe on the
+  16GB card — M2's core goal. Fixed VRAM allocation-granularity waste
+  (per-layer slot arenas). Released v0.2.0. Remaining M2: coder pack
+  (downloading), perplexity check. M3 next: batched/vectorized GEMVs
+  (compute-bound at 19 of ~113 tok/s paging ceiling), event-based handle
+  release, prefetch in the decode loop.
 - 2026-08-06: Recovered GPU passthrough on pve.g8.lo (Blackwell D3cold vfio
   bug — `vfio_pci.disable_idle_d3=1`), fixed guest DKMS kernel/header drift.
   ai.g8.lo operational. Language pivoted Python→Rust at user request before
