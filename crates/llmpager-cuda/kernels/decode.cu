@@ -89,7 +89,23 @@ extern "C" __global__ void bf16_gemv(
     if (row >= rows) return;
     const unsigned short* wr = w + (size_t)row * cols;
     float acc = 0.f;
-    for (int c = lane; c < cols; c += 32) {
+    // Vector path: 8 bf16 (one uint4) + two float4 of x per lane per step.
+    // Rows start 16B-aligned when cols % 8 == 0 (all our shapes).
+    const int vec_end = (cols % 8 == 0) ? cols : 0;
+    for (int c = lane * 8; c < vec_end; c += 32 * 8) {
+        const uint4 wv = *reinterpret_cast<const uint4*>(wr + c);
+        const float4 xa = *reinterpret_cast<const float4*>(x + c);
+        const float4 xb = *reinterpret_cast<const float4*>(x + c + 4);
+        acc += bf16_to_f32((unsigned short)(wv.x & 0xFFFFu)) * xa.x;
+        acc += bf16_to_f32((unsigned short)(wv.x >> 16)) * xa.y;
+        acc += bf16_to_f32((unsigned short)(wv.y & 0xFFFFu)) * xa.z;
+        acc += bf16_to_f32((unsigned short)(wv.y >> 16)) * xa.w;
+        acc += bf16_to_f32((unsigned short)(wv.z & 0xFFFFu)) * xb.x;
+        acc += bf16_to_f32((unsigned short)(wv.z >> 16)) * xb.y;
+        acc += bf16_to_f32((unsigned short)(wv.w & 0xFFFFu)) * xb.z;
+        acc += bf16_to_f32((unsigned short)(wv.w >> 16)) * xb.w;
+    }
+    for (int c = vec_end + lane; c < cols; c += 32) {
         acc += bf16_to_f32(wr[c]) * x[c];
     }
 #pragma unroll

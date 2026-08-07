@@ -77,9 +77,32 @@ pub fn run(f: &Flags) -> Result<()> {
     let secs = t0.elapsed().as_secs_f64();
     let bytes = blob.len() as f64 * iters as f64;
     println!(
-        "gemv: {:.1} us/launch, {:.1} GB/s weight throughput",
+        "gemv q4g64: {:.1} us/launch, {:.1} GB/s weight throughput",
         secs * 1e6 / iters as f64,
         bytes / 1e9 / secs
+    );
+
+    // bf16 GEMV throughput at a core-projection-like shape.
+    let (brows, bcols) = (4096usize, 2048usize);
+    let wb: Vec<u8> = (0..brows * bcols)
+        .flat_map(|_| ((((rng.unit() as f32 - 0.5) * 0.2).to_bits() >> 16) as u16).to_le_bytes())
+        .collect();
+    let bx: Vec<f32> = (0..bcols).map(|_| (rng.unit() as f32 - 0.5) * 2.0).collect();
+    let d_wb = cuda.alloc_device(wb.len())?;
+    let d_bx = cuda.alloc_device(bcols * 4)?;
+    let d_by = cuda.alloc_device(brows * 4)?;
+    cuda.htod_async(d_wb, &wb, stream)?;
+    cuda.htod_async(d_bx, bytemuck_f32(&bx), stream)?;
+    let t1 = Instant::now();
+    for _ in 0..iters {
+        kernels.bf16_gemv(&cuda, d_wb, d_bx, d_by, brows as i32, bcols as i32, stream)?;
+    }
+    cuda.sync_stream(stream)?;
+    let secs = t1.elapsed().as_secs_f64();
+    println!(
+        "gemv bf16 ({brows}x{bcols}): {:.1} us/launch, {:.1} GB/s weight throughput",
+        secs * 1e6 / iters as f64,
+        wb.len() as f64 * iters as f64 / 1e9 / secs
     );
     Ok(())
 }

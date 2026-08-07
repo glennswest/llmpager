@@ -33,14 +33,26 @@ extern "C" __global__ void q4g64_gemv(
         const __half s = *reinterpret_cast<const __half*>(
             scales + ((size_t)row * groups + g) * 2);
         const float sf = __half2float(s);
-        const unsigned char* dp = data + (size_t)row * (cols >> 1) + (size_t)g * 32;
-        const float* xp = x + g * 64;
+        // 32 data bytes per group as 8 uint loads; x as float4 pairs.
+        // (Data region offset is even*32 from a 4096-aligned blob base, so
+        // 4-byte loads are aligned.)
+        const unsigned int* dp =
+            reinterpret_cast<const unsigned int*>(data + (size_t)row * (cols >> 1) + (size_t)g * 32);
+        const float4* x4 = reinterpret_cast<const float4*>(x + g * 64);
         float sum = 0.f;
 #pragma unroll
-        for (int i = 0; i < 32; ++i) {
-            const unsigned char b = dp[i];
-            sum += (float)((int)(b & 0x0F) - 8) * xp[2 * i];
-            sum += (float)((int)(b >> 4) - 8) * xp[2 * i + 1];
+        for (int i = 0; i < 8; ++i) {
+            const unsigned int b = dp[i];
+            const float4 xa = x4[2 * i];
+            const float4 xb = x4[2 * i + 1];
+            sum += (float)((int)((b >> 0) & 0xFu) - 8) * xa.x;
+            sum += (float)((int)((b >> 4) & 0xFu) - 8) * xa.y;
+            sum += (float)((int)((b >> 8) & 0xFu) - 8) * xa.z;
+            sum += (float)((int)((b >> 12) & 0xFu) - 8) * xa.w;
+            sum += (float)((int)((b >> 16) & 0xFu) - 8) * xb.x;
+            sum += (float)((int)((b >> 20) & 0xFu) - 8) * xb.y;
+            sum += (float)((int)((b >> 24) & 0xFu) - 8) * xb.z;
+            sum += (float)((int)((b >> 28) & 0xFu) - 8) * xb.w;
         }
         acc += sf * sum;
     }
