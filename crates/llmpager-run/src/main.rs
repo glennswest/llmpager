@@ -27,6 +27,9 @@ fn main() -> Result<()> {
     // kernel's unpack cost eats the bandwidth win) and greedy output drifts
     // under double quantization. --core-dtype=q4 kept for experiments.
     let core_q4 = arg(&args, "core-dtype").as_deref() == Some("q4");
+    // --direct=0: let the OS page cache act as a RAM tier for the pack —
+    // right when the pack fits in host RAM; keep O_DIRECT for huge packs.
+    let direct = arg(&args, "direct").as_deref() != Some("0");
 
     // Tokenizer is optional: --prompt-ids allows raw-id smoke tests.
     let tokenizer = match arg(&args, "tokenizer") {
@@ -63,6 +66,7 @@ fn main() -> Result<()> {
         io_threads,
         max_seq,
         core_q4,
+        direct,
     )?;
     // Default off: measured 18.5 -> 10.8 tok/s. Qwen3 expert routing has
     // ~zero cross-layer correlation; wrong prefetches evict good entries

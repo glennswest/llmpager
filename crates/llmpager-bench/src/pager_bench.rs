@@ -38,7 +38,12 @@ pub fn run(f: &Flags) -> Result<()> {
     let pager = Pager::new(
         Arc::clone(&cuda),
         &path,
-        PagerConfig { slots_per_layer: slots, io_threads, decay_interval: 64.max(slots * 4) },
+        PagerConfig {
+            slots_per_layer: slots,
+            io_threads,
+            decay_interval: 64.max(slots * 4),
+            direct: true,
+        },
     )?;
 
     let mut rng = Rng::new(7);

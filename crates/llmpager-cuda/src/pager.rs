@@ -30,11 +30,15 @@ pub struct PagerConfig {
     pub io_threads: usize,
     /// Cache frequency counters halve every this many insertions per layer.
     pub decay_interval: u32,
+    /// O_DIRECT reads (bypass the OS page cache). True is right when the
+    /// pack exceeds host RAM; false lets the page cache act as a RAM tier —
+    /// misses cost a memory copy instead of a disk read once warm.
+    pub direct: bool,
 }
 
 impl Default for PagerConfig {
     fn default() -> Self {
-        Self { slots_per_layer: 32, io_threads: 4, decay_interval: 256 }
+        Self { slots_per_layer: 32, io_threads: 4, decay_interval: 256, direct: true }
     }
 }
 
@@ -103,20 +107,18 @@ pub struct Pager {
     workers: Vec<std::thread::JoinHandle<()>>,
 }
 
-fn open_reader(path: &Path) -> Result<PackReader> {
+fn open_reader(path: &Path, direct: bool) -> Result<PackReader> {
     #[cfg(target_os = "linux")]
-    {
-        PackReader::open_direct(path)
+    if direct {
+        return PackReader::open_direct(path);
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        PackReader::open(path)
-    }
+    let _ = direct;
+    PackReader::open(path)
 }
 
 impl Pager {
     pub fn new(cuda: Arc<Cuda>, pack: &Path, cfg: PagerConfig) -> Result<Self> {
-        let index = open_reader(pack)?;
+        let index = open_reader(pack, cfg.direct)?;
         let meta = index.meta().clone();
         let span = (index.max_blob_bytes().div_ceil(ALIGN) * ALIGN) as usize;
         let layers = meta.num_layers;
@@ -152,6 +154,7 @@ impl Pager {
         let (tx, rx) = channel::<Job>();
         let rx = Arc::new(Mutex::new(rx));
         let path: PathBuf = pack.to_path_buf();
+        let direct = cfg.direct;
         let mut workers = Vec::new();
         for _ in 0..cfg.io_threads.max(1) {
             let cuda = Arc::clone(&cuda);
@@ -159,7 +162,7 @@ impl Pager {
             let rx = Arc::clone(&rx);
             let path = path.clone();
             workers.push(std::thread::spawn(move || {
-                if let Err(e) = worker(cuda, shared, rx, &path) {
+                if let Err(e) = worker(cuda, shared, rx, &path, direct) {
                     eprintln!("llmpager io worker died: {e:#}");
                 }
             }));
@@ -327,9 +330,10 @@ fn worker(
     shared: Arc<Shared>,
     rx: Arc<Mutex<Receiver<Job>>>,
     pack: &Path,
+    direct: bool,
 ) -> Result<()> {
     cuda.bind_thread()?;
-    let reader = open_reader(pack)?;
+    let reader = open_reader(pack, direct)?;
     let mut pin = cuda.alloc_pinned(shared.span)?;
     let stream = cuda.stream()?;
 

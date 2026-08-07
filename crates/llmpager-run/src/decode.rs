@@ -89,6 +89,7 @@ impl Decoder {
         io_threads: usize,
         max_seq: usize,
         core_q4: bool,
+        direct: bool,
     ) -> Result<Self> {
         let meta = PackReader::open(pack_path)?.meta().clone();
         let cfg = Config::from_json(&meta.config)?;
@@ -107,7 +108,12 @@ impl Decoder {
         let pager = Pager::new(
             Arc::clone(&cuda),
             pack_path,
-            PagerConfig { slots_per_layer: slots, io_threads, decay_interval: 64.max(slots * 4) },
+            PagerConfig {
+                slots_per_layer: slots,
+                io_threads,
+                decay_interval: 64.max(slots * 4),
+                direct,
+            },
         )?;
 
         let f = |n: usize| cuda.alloc_device(n * 4);
