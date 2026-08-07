@@ -1,0 +1,20 @@
+Hi, I'm Glenn West, and I want to tell you about a project called llmpager.
+The idea is simple to say and tricky to build: run a language model that is
+bigger than the graphics card it lives on. The model has thirty billion
+parameters, about eighteen and a half gigabytes of weights, and the card
+only holds sixteen. Most people would say that can't work. But the model
+only uses a small piece of itself for every word it writes, and that
+changes everything.
+
+Think of a desk and a filing cabinet. The desk is fast and small. The
+cabinet is slow and huge. If you keep the folders you use most on the
+desk, and fetch the rare ones only when you need them, you almost never
+wait. That is the whole trick. The cache holds forty-eight experts per
+layer, the disk moves four gigabytes per second, and every number in this
+talk was measured, not guessed.
+
+We got our first real words out of the machine three hours in. The prompt
+was: the capital of France is. And the model wrote: Paris. The capital of
+the United Kingdom is London. Watching that happen, with the weights
+streaming off the disk in real time, was the moment this stopped being a
+theory and became an engine.
