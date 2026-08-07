@@ -23,6 +23,8 @@ pub struct Config {
     pub rms_eps: f32,
     pub rope_theta: f32,
     pub vocab: usize,
+    /// Token ids that end generation (config `eos_token_id`, int or list).
+    pub eos: Vec<u32>,
 }
 
 impl Config {
@@ -45,6 +47,13 @@ impl Config {
             rms_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
             rope_theta: v["rope_theta"].as_f64().unwrap_or(1e6) as f32,
             vocab: u("vocab_size")?,
+            eos: match &v["eos_token_id"] {
+                serde_json::Value::Number(n) => n.as_u64().map(|x| x as u32).into_iter().collect(),
+                serde_json::Value::Array(a) => {
+                    a.iter().filter_map(|x| x.as_u64()).map(|x| x as u32).collect()
+                }
+                _ => Vec::new(),
+            },
         })
     }
 }

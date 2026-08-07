@@ -6,8 +6,9 @@ members = [
     "crates/llmpager-convert",
     "crates/llmpager-bench",
     "crates/llmpager-run",
+    "crates/llmpager-serve",
 ]
-# llmpager-run needs nvcc (kernels feature); keep default builds/tests
+# llmpager-run/-serve need nvcc (kernels feature); keep default builds/tests
 # working on machines without the CUDA toolchain.
 default-members = [
     "crates/llmpager-core",

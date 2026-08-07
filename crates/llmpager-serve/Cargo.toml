@@ -1,6 +1,6 @@
 [package]
-name = "llmpager-run"
-description = "llmpager decode runtime: resident core + paged experts, greedy decode CLI"
+name = "llmpager-serve"
+description = "OpenAI-compatible HTTP server for llmpager"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,13 +9,10 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
-llmpager-core = { path = "../llmpager-core" }
-llmpager-cuda = { path = "../llmpager-cuda", features = ["kernels"] }
+llmpager-run = { path = "../llmpager-run" }
+tiny_http = "0.12"
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 
-[lib]
-path = "src/lib.rs"
-
 [[bin]]
-name = "llmpager-run"
+name = "llmpager-serve"
 path = "src/main.rs"

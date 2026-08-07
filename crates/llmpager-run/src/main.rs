@@ -1,5 +1,4 @@
-mod decode;
-mod model;
+use llmpager_run::decode;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -87,6 +86,9 @@ fn main() -> Result<()> {
     let mut printed = String::new();
     let t1 = Instant::now();
     for i in 0..max_tokens {
+        if dec.cfg.eos.contains(&next) {
+            break;
+        }
         generated.push(next);
         if let Some(tok) = tokenizer.as_ref() {
             let full = tok

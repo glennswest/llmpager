@@ -1,0 +1,19 @@
+[Unit]
+Description=llmpager OpenAI-compatible MoE paging server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=glenn
+ExecStart=/home/glenn/llmpager/target/release/llmpager-serve \
+  --pack=/data/models/qwen3-30b-a3b.llmpk \
+  --core=/data/models/qwen3-30b-a3b.core.safetensors \
+  --tokenizer=/home/glenn/models/qwen3-30b-a3b \
+  --model-name=qwen3-30b-a3b \
+  --port=8090 --slots=48 --direct=0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
