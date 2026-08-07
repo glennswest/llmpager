@@ -16,6 +16,8 @@ macro_rules! params {
 #[derive(Clone, Copy)]
 pub struct Kernels {
     q4g64_gemv: CUfunction,
+    q4g64_gemv_batch: CUfunction,
+    moe_reduce_f32: CUfunction,
     rmsnorm_f32: CUfunction,
     bf16_gemv: CUfunction,
     silu_mul_f32: CUfunction,
@@ -37,6 +39,8 @@ impl Kernels {
         let de = cuda.module_from_ptx(DECODE_PTX)?;
         Ok(Self {
             q4g64_gemv: cuda.function(q4, "q4g64_gemv")?,
+            q4g64_gemv_batch: cuda.function(q4, "q4g64_gemv_batch")?,
+            moe_reduce_f32: cuda.function(q4, "moe_reduce_f32")?,
             rmsnorm_f32: cuda.function(de, "rmsnorm_f32")?,
             bf16_gemv: cuda.function(de, "bf16_gemv")?,
             silu_mul_f32: cuda.function(de, "silu_mul_f32")?,
@@ -74,6 +78,52 @@ impl Kernels {
 
     /// Row-wise RMSNorm over `rows` rows of length `n`; `w` shared per row.
     #[allow(clippy::too_many_arguments)]
+    /// Batched q4g64 GEMV over `experts` blobs (device array of base
+    /// addresses) at a shared byte offset; x_stride 0 shares the input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn q4g64_gemv_batch(
+        &self,
+        cuda: &Cuda,
+        blobs: CUdeviceptr,
+        region_off: u64,
+        x: CUdeviceptr,
+        x_stride: i32,
+        y: CUdeviceptr,
+        rows: i32,
+        cols: i32,
+        experts: i32,
+        stream: CUstream,
+    ) -> Result<()> {
+        const WARPS: u32 = 4;
+        let (mut blobs, mut off, mut x, mut xs, mut y) = (blobs, region_off, x, x_stride, y);
+        let (mut rows_a, mut cols_a) = (rows, cols);
+        let mut p = params![blobs, off, x, xs, y, rows_a, cols_a];
+        cuda.launch(
+            self.q4g64_gemv_batch,
+            ((rows as u32).div_ceil(WARPS), experts as u32, 1),
+            (WARPS * 32, 1, 1),
+            &mut p,
+            stream,
+        )
+    }
+
+    /// out[n] += Σ_e wts[e] * eouts[e, n]
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_reduce(
+        &self,
+        cuda: &Cuda,
+        eouts: CUdeviceptr,
+        wts: CUdeviceptr,
+        out: CUdeviceptr,
+        experts: i32,
+        n: i32,
+        stream: CUstream,
+    ) -> Result<()> {
+        let (mut eo, mut w, mut o, mut e_a, mut n_a) = (eouts, wts, out, experts, n);
+        let mut p = params![eo, w, o, e_a, n_a];
+        cuda.launch(self.moe_reduce_f32, (grid_1d(n as usize, 256), 1, 1), (256, 1, 1), &mut p, stream)
+    }
+
     pub fn rmsnorm(
         &self,
         cuda: &Cuda,

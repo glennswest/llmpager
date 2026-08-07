@@ -12,6 +12,81 @@
 
 #include <cuda_fp16.h>
 
+// Batched variant: E experts in one launch (grid.y = expert index).
+// `blobs` holds E device base addresses; `region_off` selects gate/up/down
+// within each blob. x advances by x_stride per expert (0 = shared input),
+// y by `rows`. Same warp-per-row vectorized body as q4g64_gemv.
+extern "C" __global__ void q4g64_gemv_batch(
+    const unsigned long long* __restrict__ blobs,
+    unsigned long long region_off,
+    const float* __restrict__ x,
+    int x_stride,
+    float* __restrict__ y,
+    int rows,
+    int cols)
+{
+    const int e = blockIdx.y;
+    const unsigned char* blob = reinterpret_cast<const unsigned char*>(blobs[e] + region_off);
+    const float* xe = x + (size_t)e * x_stride;
+    float* ye = y + (size_t)e * rows;
+
+    const int warps_per_block = blockDim.x >> 5;
+    const int row = blockIdx.x * warps_per_block + (threadIdx.x >> 5);
+    const int lane = threadIdx.x & 31;
+    if (row >= rows) return;
+
+    const int groups = cols >> 6;
+    const unsigned char* scales = blob;
+    const unsigned char* data = blob + (size_t)rows * groups * 2;
+
+    float acc = 0.f;
+    for (int g = lane; g < groups; g += 32) {
+        const __half s = *reinterpret_cast<const __half*>(
+            scales + ((size_t)row * groups + g) * 2);
+        const float sf = __half2float(s);
+        const unsigned int* dp =
+            reinterpret_cast<const unsigned int*>(data + (size_t)row * (cols >> 1) + (size_t)g * 32);
+        const float4* x4 = reinterpret_cast<const float4*>(xe + g * 64);
+        float sum = 0.f;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const unsigned int b = dp[i];
+            const float4 xa = x4[2 * i];
+            const float4 xb = x4[2 * i + 1];
+            sum += (float)((int)((b >> 0) & 0xFu) - 8) * xa.x;
+            sum += (float)((int)((b >> 4) & 0xFu) - 8) * xa.y;
+            sum += (float)((int)((b >> 8) & 0xFu) - 8) * xa.z;
+            sum += (float)((int)((b >> 12) & 0xFu) - 8) * xa.w;
+            sum += (float)((int)((b >> 16) & 0xFu) - 8) * xb.x;
+            sum += (float)((int)((b >> 20) & 0xFu) - 8) * xb.y;
+            sum += (float)((int)((b >> 24) & 0xFu) - 8) * xb.z;
+            sum += (float)((int)((b >> 28) & 0xFu) - 8) * xb.w;
+        }
+        acc += sf * sum;
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+    if (lane == 0) ye[row] = acc;
+}
+
+// out[i] += sum_e wts[e] * eouts[e, i]
+extern "C" __global__ void moe_reduce_f32(
+    const float* __restrict__ eouts,
+    const float* __restrict__ wts,
+    float* __restrict__ out,
+    int experts,
+    int n)
+{
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        float a = 0.f;
+        for (int e = 0; e < experts; ++e) {
+            a += wts[e] * eouts[(size_t)e * n + i];
+        }
+        out[i] += a;
+    }
+}
+
 extern "C" __global__ void q4g64_gemv(
     const unsigned char* __restrict__ blob,
     const float* __restrict__ x,

@@ -55,11 +55,13 @@ pub struct Decoder {
     attn_out: CUdeviceptr,
     proj_out: CUdeviceptr,
     router_logits: CUdeviceptr,
+    // Batched MoE buffers: [top_k, inter] / [top_k, hidden] contiguous.
     gate_out: CUdeviceptr,
     up_out: CUdeviceptr,
     act_out: CUdeviceptr,
     expert_out: CUdeviceptr,
-    moe_acc: CUdeviceptr,
+    d_expert_ptrs: CUdeviceptr, // [top_k] u64 blob base addresses
+    d_expert_wts: CUdeviceptr,  // [top_k] f32 routing weights
     logits: CUdeviceptr,
     attn_scratch: CUdeviceptr,
     kcache: Vec<CUdeviceptr>,
@@ -126,11 +128,12 @@ impl Decoder {
             attn_out: f(qkv)?,
             proj_out: f(cfg.hidden)?,
             router_logits: f(cfg.experts)?,
-            gate_out: f(cfg.moe_inter)?,
-            up_out: f(cfg.moe_inter)?,
-            act_out: f(cfg.moe_inter)?,
-            expert_out: f(cfg.hidden)?,
-            moe_acc: f(cfg.hidden)?,
+            gate_out: f(cfg.top_k * cfg.moe_inter)?,
+            up_out: f(cfg.top_k * cfg.moe_inter)?,
+            act_out: f(cfg.top_k * cfg.moe_inter)?,
+            expert_out: f(cfg.top_k * cfg.hidden)?,
+            d_expert_ptrs: cuda.alloc_device(cfg.top_k * 8)?,
+            d_expert_wts: f(cfg.top_k)?,
             logits: f(cfg.vocab)?,
             attn_scratch: f(cfg.heads * max_seq)?,
             kcache,
@@ -206,25 +209,30 @@ impl Decoder {
                 c.norm_topk_prob,
             );
 
-            // Paged expert FFNs.
+            // Paged expert FFNs — one batched launch per projection stage.
             let ids: Vec<u16> = picks.iter().map(|p| p.0).collect();
             let handles = self.pager.request(l as u16, &ids)?;
-            cu.memset_async(self.moe_acc, 0, c.hidden * 4, st)?;
-            for (handle, (_, weight)) in handles.iter().zip(&picks) {
+            for handle in &handles {
                 self.pager.wait_stream(handle, st)?;
-                let b = handle.dev;
-                ke.q4g64_gemv(cu, b + self.gate_off, self.h_norm, self.gate_out, c.moe_inter as i32, hid, st)?;
-                ke.q4g64_gemv(cu, b + self.up_off, self.h_norm, self.up_out, c.moe_inter as i32, hid, st)?;
-                ke.silu_mul(cu, self.gate_out, self.up_out, self.act_out, c.moe_inter as i32, st)?;
-                ke.q4g64_gemv(cu, b + self.down_off, self.act_out, self.expert_out, hid, c.moe_inter as i32, st)?;
-                ke.scale_add(cu, self.moe_acc, self.expert_out, *weight, hid, st)?;
             }
+            let e = handles.len() as i32;
+            let ptrs: Vec<u8> =
+                handles.iter().flat_map(|h| h.dev.to_le_bytes()).collect();
+            let wts: Vec<u8> =
+                picks.iter().flat_map(|p| p.1.to_le_bytes()).collect();
+            cu.htod_async(self.d_expert_ptrs, &ptrs, st)?;
+            cu.htod_async(self.d_expert_wts, &wts, st)?;
+            let inter = c.moe_inter as i32;
+            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.gate_off, self.h_norm, 0, self.gate_out, inter, hid, e, st)?;
+            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.up_off, self.h_norm, 0, self.up_out, inter, hid, e, st)?;
+            ke.silu_mul(cu, self.gate_out, self.up_out, self.act_out, e * inter, st)?;
+            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, e, st)?;
+            ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, self.h, e, hid, st)?;
             // Handles pin cache slots; a release must not let a new fetch
             // overwrite a slot the enqueued GEMVs haven't read yet. Record
             // an event after this layer's expert kernels and defer the
             // release until the stream has passed it — no sync needed.
             self.defer_release(handles)?;
-            ke.add(cu, self.h, self.moe_acc, hid, st)?;
         }
 
         ke.rmsnorm(cu, self.h, self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
