@@ -12,7 +12,7 @@
 //! Greedy decode, requests served serially.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -130,7 +130,14 @@ impl Registry {
     }
 }
 
-fn generate(engine: &mut Engine, prompt: &str, max_tokens: usize) -> Result<(String, usize, usize, f64)> {
+/// Generate greedily; when `on_delta` is given, call it with each new text
+/// fragment as it decodes (streaming).
+fn generate(
+    engine: &mut Engine,
+    prompt: &str,
+    max_tokens: usize,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+) -> Result<(String, usize, usize, f64)> {
     let ids = engine
         .tok
         .encode(prompt, false)
@@ -146,11 +153,22 @@ fn generate(engine: &mut Engine, prompt: &str, max_tokens: usize) -> Result<(Str
         next = engine.dec.step(*id, pos, pos + 1 == ids.len())?;
     }
     let mut out_ids: Vec<u32> = Vec::new();
+    let mut printed = String::new();
     for i in 0..max_tokens {
         if engine.dec.cfg.eos.contains(&next) {
             break;
         }
         out_ids.push(next);
+        if let Some(cb) = on_delta.as_deref_mut() {
+            let full = engine
+                .tok
+                .decode(&out_ids, true)
+                .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+            if full.len() > printed.len() {
+                cb(&full[printed.len()..]);
+                printed = full;
+            }
+        }
         let pos = ids.len() + i;
         if pos + 1 >= 4096 {
             break;
@@ -162,6 +180,32 @@ fn generate(engine: &mut Engine, prompt: &str, max_tokens: usize) -> Result<(Str
         .decode(&out_ids, true)
         .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
     Ok((text, ids.len(), out_ids.len(), t0.elapsed().as_secs_f64()))
+}
+
+/// Blocking reader over an mpsc of byte chunks — bridges a generation
+/// thread into tiny_http's streaming response body.
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.buf.len() {
+            match self.rx.recv() {
+                Ok(chunk) => {
+                    self.buf = chunk;
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(0), // sender gone: EOF
+            }
+        }
+        let n = (self.buf.len() - self.pos).min(out.len());
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
 }
 
 /// Qwen3 ChatML-style template.
@@ -218,7 +262,7 @@ fn main() -> Result<()> {
         bail!("config: at least one model required");
     }
     let default_model = specs[0].name.clone();
-    let registry = Mutex::new(Registry { specs, max_warm, warm: Vec::new() });
+    let registry = Arc::new(Mutex::new(Registry { specs, max_warm, warm: Vec::new() }));
 
     // Warm the default model up front so the first request is fast.
     registry.lock().unwrap().warm_up(&default_model)?;
@@ -235,7 +279,14 @@ fn main() -> Result<()> {
         let _ = req.as_reader().read_to_string(&mut body);
         let resp = handle(&registry, &default_model, &method, &url, &body);
         let _ = match resp {
-            Ok(v) => req.respond(json_response(200, &v)),
+            Ok(Resp::Json(v)) => req.respond(json_response(200, &v)),
+            Ok(Resp::Stream(reader)) => {
+                let headers = vec![
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).unwrap(),
+                    tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap(),
+                ];
+                req.respond(tiny_http::Response::new(200.into(), headers, reader, None, None))
+            }
             Err(e) => req.respond(json_response(
                 400,
                 &serde_json::json!({"error": {"message": format!("{e:#}")}}),
@@ -245,13 +296,18 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+enum Resp {
+    Json(serde_json::Value),
+    Stream(ChannelReader),
+}
+
 fn handle(
-    registry: &Mutex<Registry>,
+    registry: &Arc<Mutex<Registry>>,
     default_model: &str,
     method: &str,
     url: &str,
     body: &str,
-) -> Result<serde_json::Value> {
+) -> Result<Resp> {
     match (method, url) {
         ("GET", "/v1/models") => {
             let r = registry.lock().unwrap();
@@ -269,12 +325,13 @@ fn handle(
                                         "warm": slots.is_some(), "slots": slots})
                 })
                 .collect();
-            Ok(serde_json::json!({"object": "list", "data": data}))
+            Ok(Resp::Json(serde_json::json!({"object": "list", "data": data})))
         }
         ("POST", "/v1/completions") | ("POST", "/v1/chat/completions") => {
             let chat = url == "/v1/chat/completions";
             let req: serde_json::Value = serde_json::from_str(body).context("bad JSON")?;
             let model = req["model"].as_str().unwrap_or(default_model).to_string();
+            let stream = req["stream"].as_bool().unwrap_or(false);
             let max_tokens =
                 req["max_tokens"].as_u64().unwrap_or(if chat { 256 } else { 128 }) as usize;
             let prompt = if chat {
@@ -283,15 +340,67 @@ fn handle(
                 req["prompt"].as_str().context("missing prompt")?.to_string()
             };
 
+            if stream {
+                // SSE: a generation thread owns the registry lock and feeds
+                // chunks through a channel that backs the response body.
+                let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                let reg = Arc::clone(registry);
+                std::thread::spawn(move || {
+                    let send = |v: &serde_json::Value| {
+                        let _ = tx.send(format!("data: {v}\n\n").into_bytes());
+                    };
+                    let mut r = reg.lock().unwrap();
+                    if let Err(e) = r.warm_up(&model) {
+                        send(&serde_json::json!({"error": {"message": format!("{e:#}")}}));
+                        return;
+                    }
+                    let engine = &mut r.warm[0].1;
+                    let obj = if chat { "chat.completion.chunk" } else { "text_completion" };
+                    if chat {
+                        send(&serde_json::json!({"object": obj, "model": model,
+                            "choices": [{"index": 0, "delta": {"role": "assistant"}}]}));
+                    }
+                    let mut cb = |piece: &str| {
+                        let choice = if chat {
+                            serde_json::json!({"index": 0, "delta": {"content": piece}})
+                        } else {
+                            serde_json::json!({"index": 0, "text": piece})
+                        };
+                        send(&serde_json::json!({"object": obj, "model": model,
+                                                  "choices": [choice]}));
+                    };
+                    match generate(engine, &prompt, max_tokens, Some(&mut cb)) {
+                        Ok((_, p, c, secs)) => {
+                            let done_choice = if chat {
+                                serde_json::json!({"index": 0, "delta": {}, "finish_reason": "stop"})
+                            } else {
+                                serde_json::json!({"index": 0, "text": "", "finish_reason": "stop"})
+                            };
+                            send(&serde_json::json!({"object": obj, "model": model,
+                                "choices": [done_choice],
+                                "usage": {"prompt_tokens": p, "completion_tokens": c,
+                                           "total_tokens": p + c},
+                                "llmpager": {"seconds": secs,
+                                              "tok_per_sec": c as f64 / secs.max(1e-9)}}));
+                            let _ = tx.send(b"data: [DONE]\n\n".to_vec());
+                        }
+                        Err(e) => {
+                            send(&serde_json::json!({"error": {"message": format!("{e:#}")}}));
+                        }
+                    }
+                });
+                return Ok(Resp::Stream(ChannelReader { rx, buf: Vec::new(), pos: 0 }));
+            }
+
             let mut r = registry.lock().unwrap();
             r.warm_up(&model)?;
             let engine = &mut r.warm[0].1;
-            let (text, p_toks, c_toks, secs) = generate(engine, &prompt, max_tokens)?;
+            let (text, p_toks, c_toks, secs) = generate(engine, &prompt, max_tokens, None)?;
             let usage = serde_json::json!({"prompt_tokens": p_toks,
                 "completion_tokens": c_toks, "total_tokens": p_toks + c_toks});
             let perf = serde_json::json!({"seconds": secs,
                 "tok_per_sec": c_toks as f64 / secs.max(1e-9)});
-            Ok(if chat {
+            Ok(Resp::Json(if chat {
                 serde_json::json!({
                     "id": "chatcmpl-llmpager", "object": "chat.completion", "model": model,
                     "choices": [{"index": 0,
@@ -303,7 +412,7 @@ fn handle(
                     "id": "cmpl-llmpager", "object": "text_completion", "model": model,
                     "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
                     "usage": usage, "llmpager": perf})
-            })
+            }))
         }
         _ => bail!("no such endpoint: {method} {url}"),
     }
