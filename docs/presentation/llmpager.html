@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llmpager — Running MoE Models Bigger Than VRAM</title>
+<style>
+  :root {
+    --rh-red: #EE0000;
+    --rh-dark-red: #A30000;
+    --rh-black: #151515;
+    --rh-gray: #6A6E73;
+    --rh-light: #F2F2F2;
+    --rh-white: #FFFFFF;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: var(--rh-black); }
+  body {
+    font-family: "Red Hat Text", "Red Hat Display", "Inter", "Helvetica Neue", Arial, sans-serif;
+    color: var(--rh-black);
+    overflow: hidden;
+  }
+  .deck { height: 100vh; width: 100vw; position: relative; }
+  section.slide {
+    position: absolute; inset: 0;
+    display: none;
+    flex-direction: column;
+    padding: 4.5vh 5vw 7vh 5vw;
+    background: var(--rh-white);
+  }
+  section.slide.active { display: flex; }
+  section.dark { background: var(--rh-black); color: var(--rh-white); }
+  section.red-strip::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 10px;
+    background: var(--rh-red);
+  }
+  h1 { font-family: "Red Hat Display", "Inter", Arial, sans-serif; font-weight: 900; font-size: 5.2vh; line-height: 1.15; }
+  h2 { font-family: "Red Hat Display", "Inter", Arial, sans-serif; font-weight: 700; font-size: 4.2vh; margin-bottom: 2.2vh; }
+  h2 .accent { color: var(--rh-red); }
+  h3 { font-size: 2.6vh; font-weight: 700; margin: 1.6vh 0 0.8vh 0; }
+  p, li { font-size: 2.4vh; line-height: 1.5; }
+  li { margin-bottom: 1.1vh; }
+  ul { padding-left: 3.2vh; }
+  .sub { color: var(--rh-gray); }
+  .dark .sub { color: #B8BBBE; }
+  .kicker {
+    color: var(--rh-red); font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; font-size: 1.9vh; margin-bottom: 1.4vh;
+  }
+  .grow { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .cols { display: flex; gap: 4vw; align-items: flex-start; }
+  .cols > div { flex: 1; min-width: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.2vh 0; }
+  th, td { text-align: left; padding: 1.1vh 1.4vh; font-size: 2.2vh; border-bottom: 1px solid #D2D2D2; }
+  th { border-bottom: 3px solid var(--rh-red); font-weight: 700; }
+  .dark th, .dark td { border-color: #3C3F42; }
+  .dark th { border-bottom-color: var(--rh-red); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .hero-num { font-family: "Red Hat Display", Arial, sans-serif; font-weight: 900; font-size: 8.5vh; color: var(--rh-red); line-height: 1; }
+  .hero-label { font-size: 2.3vh; color: var(--rh-gray); margin-top: 0.8vh; }
+  .stat-row { display: flex; gap: 3vw; margin: 2.5vh 0; }
+  .stat { flex: 1; border-top: 4px solid var(--rh-red); padding-top: 1.2vh; }
+  code, pre {
+    font-family: "Red Hat Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 1.95vh;
+  }
+  pre {
+    background: var(--rh-black); color: #E8E8E8; padding: 1.8vh 2vh;
+    border-left: 5px solid var(--rh-red);
+    overflow-x: auto; line-height: 1.5; margin: 1.2vh 0;
+  }
+  .dark pre { background: #212427; }
+  pre .c { color: #8A8D90; }
+  pre .g { color: #5BA352; }
+  pre .r { color: #FF6B6B; }
+  .quote {
+    border-left: 6px solid var(--rh-red); padding: 1vh 2.4vh; margin: 2vh 0;
+    font-size: 2.7vh; font-style: italic; background: var(--rh-light);
+  }
+  .dark .quote { background: #212427; }
+  .footer {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 5vh;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 5vw; font-size: 1.7vh; color: var(--rh-gray);
+    border-top: 1px solid #E8E8E8;
+    background: inherit;
+  }
+  .dark .footer { border-top-color: #3C3F42; }
+  .brandmark { font-family: "Red Hat Display", Arial, sans-serif; font-weight: 900; }
+  .brandmark .hat { color: var(--rh-red); }
+  .counter { font-variant-numeric: tabular-nums; }
+  .bar-chart { margin: 1.5vh 0; }
+  .bar-row { display: flex; align-items: center; gap: 1.5vh; margin-bottom: 1.3vh; }
+  .bar-label { width: 30vh; font-size: 2vh; text-align: right; flex-shrink: 0; }
+  .bar-track { flex: 1; }
+  .bar {
+    background: var(--rh-red); color: #fff; font-size: 1.9vh; font-weight: 700;
+    padding: 0.5vh 1vh; white-space: nowrap; min-width: 4vh;
+  }
+  .bar.gray { background: var(--rh-gray); }
+  .bar.dark { background: var(--rh-black); border: 1px solid #555; }
+  .pill {
+    display: inline-block; border: 2px solid var(--rh-red); color: var(--rh-red);
+    font-weight: 700; font-size: 1.9vh; padding: 0.3vh 1.4vh; border-radius: 3vh;
+    margin-right: 1vh; margin-bottom: 1vh;
+  }
+  .dark .pill { border-color: var(--rh-red); color: #fff; background: var(--rh-red); }
+  .flow { display: flex; align-items: stretch; gap: 0; margin: 2.5vh 0; }
+  .flow .node {
+    flex: 1; border: 2px solid var(--rh-black); padding: 1.4vh; text-align: center;
+    font-size: 2vh; font-weight: 700; display: flex; flex-direction: column; justify-content: center;
+  }
+  .flow .node small { font-weight: 400; font-size: 1.7vh; color: var(--rh-gray); margin-top: 0.5vh; }
+  .flow .arrow { display: flex; align-items: center; padding: 0 1vh; font-size: 3vh; color: var(--rh-red); font-weight: 900; }
+  .checklist li::marker { content: "✔  "; color: var(--rh-red); }
+  .xlist li::marker { content: "✘  "; color: var(--rh-red); }
+  @media print {
+    body { overflow: visible; }
+    section.slide { display: flex !important; position: relative; height: 100vh; page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+<!-- 1 · TITLE -->
+<section class="slide dark active">
+  <div class="grow">
+    <div class="kicker">Linux · NVIDIA · Rust</div>
+    <h1>llmpager</h1>
+    <h1 style="color:#B8BBBE; font-weight:400; font-size:4vh; margin-top:1.5vh;">
+      Running Mixture-of-Experts models bigger than VRAM
+    </h1>
+    <p class="sub" style="margin-top:4vh; font-size:2.3vh;">
+      A 30B-parameter MoE, 18.5&nbsp;GB of weights, serving two models at once —<br>
+      on a 16&nbsp;GB consumer GPU, with experts paged from NVMe.
+    </p>
+    <p style="margin-top:5vh; font-size:2.2vh;">Glenn West &nbsp;·&nbsp; August 2026</p>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>github.com/glennswest/llmpager</span><span class="counter"></span></div>
+</section>
+
+<!-- 2 · AGENDA -->
+<section class="slide red-strip">
+  <h2>Agenda</h2>
+  <div class="grow">
+    <div class="stat-row">
+      <div class="stat"><h3>Overview</h3><p class="sub">The problem, the idea, the hardware</p></div>
+      <div class="stat"><h3>Source</h3><p class="sub">Architecture, formats, pager, kernels</p></div>
+      <div class="stat"><h3>Results</h3><p class="sub">Every number measured, kept or rejected</p></div>
+      <div class="stat"><h3>Lessons</h3><p class="sub">What the data taught us</p></div>
+    </div>
+    <p class="sub" style="margin-top:3vh">Everything in this deck is reproducible: numbers come from
+    <code>docs/BENCHMARKS.md</code> and <code>docs/PERFORMANCE.md</code> in the repo, measured on one machine over three days.</p>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager</span><span class="counter"></span></div>
+</section>
+
+<!-- 3 · PROBLEM -->
+<section class="slide red-strip">
+  <div class="kicker">Overview</div>
+  <h2>The problem: MoE weights don't fit</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li>Mixture-of-Experts models activate a <b>tiny fraction</b> of their weights per token — Qwen3-30B-A3B touches ~3B of 30B parameters.</li>
+          <li>Conventional engines still require <b>all</b> expert weights resident in GPU or CPU memory.</li>
+          <li>Our card: RTX 5060 Ti, <b>16 GB VRAM</b>. The model: <b>18.5 GB</b> at 4-bit — before KV cache and activations.</li>
+        </ul>
+        <p class="quote">Expert routing is heavily skewed in practice.<br>Skew is what caches are for.</p>
+      </div>
+      <div>
+        <table>
+          <tr><th>Qwen3-30B-A3B</th><th class="num"></th></tr>
+          <tr><td>Layers</td><td class="num">48</td></tr>
+          <tr><td>Experts per layer</td><td class="num">128</td></tr>
+          <tr><td>Active per token</td><td class="num">top-8</td></tr>
+          <tr><td>Expert weights (q4)</td><td class="num">15.4 GB</td></tr>
+          <tr><td>Shared core (bf16)</td><td class="num">3.1 GB</td></tr>
+          <tr><td><b>Total vs 16 GB VRAM</b></td><td class="num"><b>18.5 GB</b></td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Overview</span><span class="counter"></span></div>
+</section>
+
+<!-- 4 · IDEA -->
+<section class="slide red-strip">
+  <div class="kicker">Overview</div>
+  <h2>The idea: treat experts like <span class="accent">pages</span></h2>
+  <div class="grow">
+    <ul>
+      <li>Keep the <b>shared core</b> resident in VRAM: embeddings, attention, router, norms, KV cache.</li>
+      <li><b>Stream routed experts from NVMe on demand</b>; cache the hot ones in VRAM with an aged-LFU, per layer.</li>
+      <li>Inspired by turbo-fieldfare (Apple Silicon / Metal); rebuilt for Linux + CUDA, then taken further: multi-model serving with a VRAM budgeter.</li>
+    </ul>
+    <div class="flow">
+      <div class="node">Router top-k<small>resident, per layer</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">Expert cache<small>aged LFU, VRAM slots</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">Miss: O_DIRECT pread<small>NVMe / RAM tier</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">Pinned ring &rarr; H2D<small>async, CUDA events</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">Expert FFN<small>batched q4 GEMV</small></div>
+    </div>
+    <p class="sub">Hits cost nothing. Misses overlap with compute. The disk only ever sees what the cache can't hold.</p>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Overview</span><span class="counter"></span></div>
+</section>
+
+<!-- 5 · HARDWARE -->
+<section class="slide red-strip">
+  <div class="kicker">Overview</div>
+  <h2>The lab: one VM, measured limits</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <table>
+          <tr><th>ai.g8.lo (VM 600 on Proxmox)</th><th></th></tr>
+          <tr><td>GPU</td><td>RTX 5060 Ti 16 GB (Blackwell), vfio passthrough</td></tr>
+          <tr><td>CPU / RAM</td><td>12 vCPU · 64 GB</td></tr>
+          <tr><td>Storage</td><td>200 GB root + 800 GB /data (NVMe-backed)</td></tr>
+          <tr><td>Stack</td><td>Debian 13 · driver 610.43 · CUDA 13.3 · Rust 1.96</td></tr>
+        </table>
+        <p class="sub">Day-zero war story: the new motherboard's ACPI D3cold support
+        wedged the GPU under vfio — <code>vfio_pci.disable_idle_d3=1</code>
+        (Proxmox bug #7374) fixed passthrough before line one of code.</p>
+      </div>
+      <div>
+        <table>
+          <tr><th>Measured ceiling</th><th class="num">Value</th></tr>
+          <tr><td>VRAM bandwidth (spec)</td><td class="num">~448 GB/s</td></tr>
+          <tr><td>Pinned H2D over PCIe</td><td class="num">25.3 GB/s</td></tr>
+          <tr><td>NVMe O_DIRECT random 3 MB reads</td><td class="num">4.3 GB/s</td></tr>
+          <tr><td>Expert fetch latency (99%)</td><td class="num">&lt; 2 ms</td></tr>
+        </table>
+        <p class="sub">Every design decision traces back to these four numbers.</p>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Overview</span><span class="counter"></span></div>
+</section>
+
+<!-- 6 · SOURCE MAP -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>Five crates, ~5k lines of Rust + CUDA C</h2>
+  <div class="grow">
+    <table>
+      <tr><th>Crate</th><th>What it owns</th><th>Depends on GPU?</th></tr>
+      <tr><td><code>llmpager-core</code></td><td>.llmpk pack format · aged-LFU cache · q4g64 quantization · safetensors reader</td><td>No — tests run anywhere</td></tr>
+      <tr><td><code>llmpager-cuda</code></td><td>Driver wrapper (runtime-loaded libcuda) · async pager · 12 CUDA kernels</td><td>Runtime only, no toolkit</td></tr>
+      <tr><td><code>llmpager-convert</code></td><td>HF checkpoint &rarr; expert pack + pageable core (21 s for 30B)</td><td>No</td></tr>
+      <tr><td><code>llmpager-run</code></td><td>Decode loop · KV cache · router · perplexity mode · CLI</td><td>Yes</td></tr>
+      <tr><td><code>llmpager-serve</code></td><td>OpenAI-compatible HTTP · model registry · VRAM budgeter · systemd</td><td>Yes</td></tr>
+    </table>
+    <ul>
+      <li><b>No CUDA toolkit at runtime</b> — the driver API is loaded from <code>libcuda.so.1</code>; kernels compile to PTX at build time and the driver JITs them onto Blackwell.</li>
+      <li>Apache-2.0 · <b>github.com/glennswest/llmpager</b> · 9 tagged releases in 3 days.</li>
+    </ul>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 7 · PACK FORMAT -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>The expert pack: <span class="accent">.llmpk</span></h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+<pre>[0..4096)   header: magic, JSON meta
+            (model config embedded)
+[4096..)    index: offset+len per
+            (layer, expert) — 16 B each
+[...]       blobs: gate/up/down weights,
+            q4g64, each 4096-aligned</pre>
+        <p class="sub" style="margin-top:1vh">q4g64: symmetric 4-bit, groups of 64, f16 scale per group —
+        scales-then-nibbles layout so the GEMV kernel streams both linearly.</p>
+      </div>
+      <div>
+        <ul>
+          <li><b>Everything is 4096-byte aligned</b> so every read is O_DIRECT-legal: aligned offset, aligned pinned buffer, aligned span.</li>
+          <li>One blob per (layer, expert): the unit of paging, ~2.5 MB for this model.</li>
+          <li>The resident core ships separately as ordinary safetensors — <b>pageable as one artifact</b>, which is what makes 0.8 s model switching possible later.</li>
+          <li>Converter reads HF shards directly with <code>pread</code> — no 4 GB shard ever loaded whole; 48&times;128 experts quantized in parallel: <b>21 seconds</b>.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 8 · PAGER -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>The async pager</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li><b>I/O worker pool</b>: each worker owns an O_DIRECT fd, a pinned staging buffer, and a CUDA stream.</li>
+          <li>Miss path: <code>pread &rarr; pinned &rarr; cuMemcpyHtoDAsync &rarr; cuEventRecord</code>. Compute streams wait on the event — <b>no host blocking on hits</b>.</li>
+          <li>Cache slots are <b>pinned by refcount</b> while kernels read them; releases ride a CUDA-event ring, not stream syncs.</li>
+          <li>Slot memory is <b>per-layer arenas</b> — thousands of individual 2.5 MB allocations wasted ~60% of VRAM to allocation granularity (found as an OOM).</li>
+        </ul>
+      </div>
+      <div>
+        <table>
+          <tr><th>Pager property</th><th class="num">Measured</th></tr>
+          <tr><td>Paging ceiling, 48 slots + prefetch</td><td class="num">113 tok/s</td></tr>
+          <tr><td>Prefetch one layer ahead</td><td class="num">+42%</td></tr>
+          <tr><td>Fetch latency, 99th percentile</td><td class="num">&lt; 2 ms</td></tr>
+          <tr><td>Stalls observed, all runs</td><td class="num">0</td></tr>
+        </table>
+        <p class="sub">The ceiling means: the pager can feed experts 3&times; faster than the compute currently consumes them.</p>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 9 · KERNELS -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>Twelve kernels, all verified against CPU references</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li>q4g64 GEMV (single + <b>batched across top-k experts</b>)</li>
+          <li>bf16 GEMV (vectorized <code>uint4</code> loads)</li>
+          <li>RMSNorm (row-batched for per-head q/k norm)</li>
+          <li>NeoX RoPE · GQA decode attention · KV append</li>
+          <li>SiLU-mul · residual add · weighted MoE reduce · embed gather</li>
+        </ul>
+        <p class="quote">Worst relative error across the whole set: <b>1.9e-6</b>.<br>
+        Correctness first made every optimization a pure perf diff.</p>
+      </div>
+      <div>
+<pre><span class="c">// build.rs: nvcc &rarr; PTX (compute_80),</span>
+<span class="c">// driver JITs to sm_120 at load</span>
+q4g64_gemv&lt;warp per row&gt;
+  scales: f16, streamed linearly
+  data:   8&times;u32 nibble words / group
+  x:      float4 pairs
+<span class="g">// 35 &rarr; 122 GB/s from vector loads alone</span></pre>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 10 · RESULTS HERO -->
+<section class="slide dark">
+  <div class="grow" style="text-align:center">
+    <div class="kicker" style="margin-bottom:3vh">Results · 19:00 on day one</div>
+    <p style="font-size:3.2vh; color:#B8BBBE">"The capital of France is</p>
+    <h1 style="font-size:7vh; margin:1.5vh 0"><span style="color:var(--rh-red)">Paris.</span> The capital of the United Kingdom is London..."</h1>
+    <p class="sub" style="margin-top:3vh; font-size:2.4vh">
+      First real tokens from an 18.5 GB model on a 16 GB card —<br>
+      converter &rarr; pack &rarr; kernels &rarr; router &rarr; pager, all agreeing at once.
+    </p>
+    <div class="stat-row" style="margin-top:5vh; text-align:left">
+      <div class="stat"><div class="hero-num">21s</div><div class="hero-label">to convert the 30B checkpoint</div></div>
+      <div class="stat"><div class="hero-num">83%</div><div class="hero-label">expert-cache hit rate, first run</div></div>
+      <div class="stat"><div class="hero-num">~8h</div><div class="hero-label">from wedged GPU + empty repo to this</div></div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Results</span><span class="counter"></span></div>
+</section>
+
+<!-- 11 · SCOREBOARD -->
+<section class="slide red-strip">
+  <div class="kicker">Results</div>
+  <h2>Decode speed: <span class="accent">19.9 &rarr; 37.6 tok/s</span> (+89%)</h2>
+  <div class="grow">
+    <div class="bar-chart">
+      <div class="bar-row"><div class="bar-label">M2 baseline (scalar kernels)</div><div class="bar-track"><div class="bar gray" style="width:35%">19.9</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ vectorized GEMVs</div><div class="bar-track"><div class="bar" style="width:55%">31.1</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ event-ring handle release</div><div class="bar-track"><div class="bar" style="width:58%">33.1</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ batched MoE launches</div><div class="bar-track"><div class="bar" style="width:61%">34.8</div></div></div>
+      <div class="bar-row"><div class="bar-label">+ RAM tier (page cache)</div><div class="bar-track"><div class="bar" style="width:66%">37.6</div></div></div>
+      <div class="bar-row"><div class="bar-label sub">paging ceiling (no compute)</div><div class="bar-track"><div class="bar dark" style="width:100%">113 tok/s — remaining headroom</div></div></div>
+    </div>
+    <ul>
+      <li>Vectorized loads: q4 GEMV 35 &rarr; 122 GB/s; bf16 GEMV to ~VRAM bandwidth. <b>+56% alone.</b></li>
+      <li>RAM tier: pack (15.4 GB) fits in RAM (64 GB) — misses become memory copies. Cold prompts: <b>20.4 &rarr; 32.2 tok/s.</b></li>
+    </ul>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Results</span><span class="counter"></span></div>
+</section>
+
+<!-- 12 · CACHE SWEEP -->
+<section class="slide red-strip">
+  <div class="kicker">Results</div>
+  <h2>Cache size is a curve, not a cliff</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <table>
+          <tr><th>Slots/layer</th><th class="num">VRAM</th><th class="num">Warm prompt</th><th class="num">Cold prompt</th></tr>
+          <tr><td>24</td><td class="num">2.9 GB</td><td class="num">14.8 tok/s</td><td class="num">11.2</td></tr>
+          <tr><td>32</td><td class="num">3.9 GB</td><td class="num">21.0</td><td class="num">13.2</td></tr>
+          <tr><td>48</td><td class="num">5.8 GB</td><td class="num">33.3</td><td class="num">20.4</td></tr>
+          <tr><td>64</td><td class="num">7.7 GB</td><td class="num">34.6</td><td class="num">25.5</td></tr>
+        </table>
+        <p class="sub">O_DIRECT, Qwen3-30B-A3B, 64 tokens, hit rates 58–90%.</p>
+      </div>
+      <div>
+        <ul>
+          <li>Real routing is <b>flatter than synthetic benchmarks</b> — the 80/20 assumption gave 93% hits; reality gave 84–89%.</li>
+          <li>Warm workloads plateau at 48 slots; cold workloads keep paying for misses.</li>
+          <li>Conclusion that shaped the roadmap: <b>make misses cheaper, not just rarer</b> — which is exactly what the RAM tier did.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Results</span><span class="counter"></span></div>
+</section>
+
+<!-- 13 · PPL -->
+<section class="slide red-strip">
+  <div class="kicker">Results</div>
+  <h2>Correctness, proven: paging is <span class="accent">lossless</span></h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <table>
+          <tr><th>Configuration</th><th class="num">Perplexity</th></tr>
+          <tr><td>48 slots, bf16 core</td><td class="num"><b>8.6199</b></td></tr>
+          <tr><td>24 slots, bf16 core</td><td class="num"><b>8.6199</b></td></tr>
+          <tr><td>48 slots, q4 core</td><td class="num">9.0038 (+4.5%)</td></tr>
+        </table>
+        <p class="sub">Teacher-forced NLL, 137-token English text, <code>--ppl</code> mode.</p>
+      </div>
+      <div>
+        <ul>
+          <li>Identical to four decimals across cache sizes: <b>the cache changes when weights arrive, never what they are.</b></li>
+          <li>This invariance is what makes the VRAM budgeter safe — resizing a live model's cache carries zero quality risk.</li>
+          <li>The q4-core row prices an earlier rejected experiment: +4.5% PPL was the quality tax, on top of being slower in decode.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Results</span><span class="counter"></span></div>
+</section>
+
+<!-- 14 · MULTI-MODEL -->
+<section class="slide red-strip">
+  <div class="kicker">Results</div>
+  <h2>Two models, one 16 GB card, live service</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li>OpenAI-compatible endpoint (systemd, port 8090); requests routed by the standard <code>model:</code> field.</li>
+          <li>Qwen3-30B-A3B + Qwen3-Coder-30B-A3B — <b>36.9 GB of weights, both warm at once</b>.</li>
+          <li>VRAM budgeter: solo model gets 48 slots (~33 tok/s); when a second warms, residents shrink to 24/24 (~14 tok/s each).</li>
+          <li>Unload actually frees VRAM (pager arenas, core, KV, events) — eviction is honest.</li>
+        </ul>
+      </div>
+      <div>
+<pre><span class="c"># journalctl -u llmpager</span>
+loaded qwen3-30b-a3b (48 slots) in 2.4s
+<span class="r">budgeter: qwen3-30b-a3b 48 &rarr; 24 slots</span>
+loaded qwen3-coder (24 slots) <span class="g">in 0.8s</span></pre>
+        <p class="quote" style="font-size:2.3vh"><b>0.8 seconds</b> to bring an 18.5 GB model into rotation — only the 3.1 GB core moves; experts page themselves in.</p>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Results</span><span class="counter"></span></div>
+</section>
+
+<!-- 15 · LESSONS: MEASURE -->
+<section class="slide red-strip">
+  <div class="kicker">Lessons learned</div>
+  <h2>1 · Measure, don't guess — three confident ideas, three rejections</h2>
+  <div class="grow">
+    <table>
+      <tr><th>Plausible idea</th><th>What the data said</th><th>Why</th></tr>
+      <tr><td>Quantize the core to q4<br><span class="sub">(4&times; less bandwidth!)</span></td><td class="num"><b>25.9</b> vs 33.1 tok/s + quality drift</td><td>The q4 kernel is unpack-ALU-bound at 122 GB/s; bf16 runs at ~400. Bandwidth ratios only convert to speed if kernels are equally efficient.</td></tr>
+      <tr><td>Prefetch layer L+1 with layer L's experts</td><td class="num"><b>10.8</b> vs 18.5 tok/s, 3&times; disk traffic</td><td>Qwen3 routing is uncorrelated across layers. Wrong prefetch is worse than none: it evicts hot entries <i>and</i> steals bandwidth.</td></tr>
+      <tr><td>More I/O threads = more disk throughput</td><td class="num">8 threads: 3.6 GB/s · 1 thread: <b>4.3</b></td><td>One virtio-scsi queue. Few deep readers beat many shallow ones.</td></tr>
+    </table>
+    <p class="quote">Same weights, different workload, opposite conclusion: q4-core <i>loses</i> in decode but <i>wins</i> in teacher-forced PPL mode (lm_head-dominated). <b>Measure the workload you ship.</b></p>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Lessons</span><span class="counter"></span></div>
+</section>
+
+<!-- 16 · LESSONS: SYSTEMS -->
+<section class="slide red-strip">
+  <div class="kicker">Lessons learned</div>
+  <h2>2 · The memory hierarchy is the product</h2>
+  <div class="grow">
+    <ul>
+      <li><b>O_DIRECT is a policy, not a principle.</b> Bypassing the page cache is right when the pack exceeds RAM — and exactly wrong when it fits. Flipping one flag (<code>--direct=0</code>) was the single biggest decode win (+58% on cold prompts).</li>
+      <li><b>Allocation granularity is real money.</b> 3,072 individual 2.5 MB device allocations silently became ~4 MB each — 60% of the cache budget gone. Arena allocation fixed an "impossible" OOM.</li>
+      <li><b>Overlap beats bandwidth.</b> One layer of prefetch bought +42% with zero extra bytes moved. The event-ring release bought +6% by never draining the pipeline.</li>
+      <li><b>Caches must age.</b> Pure LFU pins yesterday's hot experts forever; halving counters periodically lets the cache track the workload's drift.</li>
+      <li><b>The bottleneck migrates.</b> Disk &rarr; kernels &rarr; launch overhead &rarr; misses &rarr; host round-trips. Every fix moved it; only measurement found where it went.</li>
+    </ul>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Lessons</span><span class="counter"></span></div>
+</section>
+
+<!-- 17 · LESSONS: PROCESS -->
+<section class="slide red-strip">
+  <div class="kicker">Lessons learned</div>
+  <h2>3 · Process: correctness first, ship the ladder</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul class="checklist" style="list-style-position:inside; padding-left:0">
+          <li><b>Correctness before speed.</b> Every kernel verified against a CPU reference (worst 1.9e-6) before any optimization — so every perf change was a pure diff against known-good output.</li>
+          <li><b>Prove the ceiling first.</b> M0/M1 measured a 113 tok/s paging ceiling before any model code existed — we always knew paging wasn't the wall.</li>
+          <li><b>Negative results are deliverables.</b> Three rejections live in PERFORMANCE.md with numbers; they're worth as much as the wins.</li>
+        </ul>
+      </div>
+      <div>
+        <table>
+          <tr><th>Milestone ladder</th><th class="num">Releases</th></tr>
+          <tr><td>M0 paging proof &rarr; M1 async pager</td><td class="num">day 1</td></tr>
+          <tr><td>M2 real tokens ("Paris.")</td><td class="num">day 1, hour 8</td></tr>
+          <tr><td>M3 perf: +89%</td><td class="num">day 2</td></tr>
+          <tr><td>M4 serving · M5 multi-model</td><td class="num">day 2–3</td></tr>
+          <tr><td><b>Total</b></td><td class="num"><b>9 tagged releases</b></td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Lessons</span><span class="counter"></span></div>
+</section>
+
+<!-- 18 · FUTURE -->
+<section class="slide red-strip">
+  <div class="kicker">What's next</div>
+  <h2>Headroom and horizons</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <h3>Near term</h3>
+        <ul>
+          <li>Chase the ceiling: 37.6 measured vs 113 tok/s paged — q4-kernel ALU work, GPU router top-k, warm-start prefill.</li>
+          <li>Budgeter v2: request-rate-weighted cache sizing.</li>
+          <li>80B-A3B coder: same 3B active &rarr; same speed class, ~40 GB pack — a "needs 45 GB VRAM" model on 16 GB.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Kimi-class (1T+), sized honestly</h3>
+        <ul>
+          <li>~600 GB q4 pack fits the 800 GB /data volume.</li>
+          <li>16 GB VRAM caches only ~1.3% of 23k experts &rarr; the <b>pinned partial RAM tier</b> becomes load-bearing.</li>
+          <li>Expected: 0.5–1.5 tok/s — batch territory, same class as published demos. Interactive stays the 3B-active sweet spot.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="quote">The machinery is model-agnostic: pack + core + config. Anything MoE with skewed routing pages.</p>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Next</span><span class="counter"></span></div>
+</section>
+
+<!-- 19 · CLOSE -->
+<section class="slide dark">
+  <div class="grow">
+    <div class="kicker">Try it</div>
+    <h2 style="color:#fff">One curl away</h2>
+<pre>curl http://ai.g8.lo:8090/v1/chat/completions \
+  -d '{"model": "qwen3-coder-30b-a3b",
+       "messages": [{"role":"user","content":"..."}]}'</pre>
+    <div style="margin-top:4vh">
+      <span class="pill">github.com/glennswest/llmpager</span>
+      <span class="pill">docs/PERFORMANCE.md — every number</span>
+      <span class="pill">docs/DESIGN.md — the architecture</span>
+    </div>
+    <p class="sub" style="margin-top:5vh; font-size:2.6vh">
+      An 18.5 GB model answering questions about memory paging,<br>
+      while its own experts are being paged.&nbsp; <span style="color:var(--rh-red)">Thank you.</span>
+    </p>
+  </div>
+  <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>Glenn West · August 2026</span><span class="counter"></span></div>
+</section>
+
+</div>
+<script>
+  const slides = Array.from(document.querySelectorAll("section.slide"));
+  let cur = Math.min(Math.max(parseInt(location.hash.slice(1) || "1", 10) - 1 || 0, 0), slides.length - 1);
+  function show(i) {
+    cur = Math.min(Math.max(i, 0), slides.length - 1);
+    slides.forEach((s, j) => s.classList.toggle("active", j === cur));
+    document.querySelectorAll(".counter").forEach(c => c.textContent = (cur + 1) + " / " + slides.length);
+    history.replaceState(null, "", "#" + (cur + 1));
+  }
+  addEventListener("keydown", e => {
+    if (["ArrowRight", "PageDown", " "].includes(e.key)) { show(cur + 1); e.preventDefault(); }
+    else if (["ArrowLeft", "PageUp"].includes(e.key)) { show(cur - 1); e.preventDefault(); }
+    else if (e.key === "Home") show(0);
+    else if (e.key === "End") show(slides.length - 1);
+  });
+  addEventListener("click", e => {
+    if (e.clientX > innerWidth * 0.75) show(cur + 1);
+    else if (e.clientX < innerWidth * 0.25) show(cur - 1);
+  });
+  show(cur);
+</script>
+</body>
+</html>

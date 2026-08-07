@@ -139,3 +139,6 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **perf:** Batched MoE launches (33.1→34.8 tok/s); prefill skips lm_head for non-final tokens; cross-layer prefetch measured and rejected (cache pollution) — details in PERFORMANCE.md
 
 - **feat:** Qwen3-Coder-30B-A3B converted and verified — second model running through the same engine (18.6 tok/s cold-cache)
+
+### 2026-08-07
+- **docs:** Red Hat-styled HTML presentation (docs/presentation/llmpager.html) — overview, source, results, lessons learned
