@@ -214,6 +214,7 @@
       <tr><td><b>Mixture&nbsp;of&nbsp;Experts</b></td><td>Instead of one giant network, 128 small specialist networks ("experts") per layer. A "router" picks the best 8 for each token — so ~90% of the model sits idle at any moment.</td></tr>
       <tr><td><b>Quantization (q4)</b></td><td>Storing weights with 4 bits instead of 16 — like compressing a photo. 4&times; smaller, tiny loss in fidelity (we measured it: slide on perplexity).</td></tr>
       <tr><td><b>Paging / cache</b></td><td>The desk-and-filing-cabinet trick every OS uses: keep what you're using on the desk (VRAM), fetch the rest from the cabinet (disk) when asked, keep recently used items handy.</td></tr>
+      <tr><td><b>Perplexity</b></td><td>The standard quality score for language models: how "surprised" the model is by real text. Lower is better — and any corruption of the weights shows up in it immediately, which makes it our correctness detector.</td></tr>
     </table>
   </div>
   <div class="footer"><span class="brandmark"><span class="hat">&#9650;</span> Red Hat</span><span>llmpager · Overview</span><span class="counter"></span></div>
