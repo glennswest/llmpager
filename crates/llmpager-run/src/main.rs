@@ -51,8 +51,10 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("encode: {e}"))?
             .get_ids()
             .to_vec()
+    } else if arg(&args, "ppl").is_some() {
+        vec![1] // unused in --ppl mode
     } else {
-        bail!("need --prompt or --prompt-ids");
+        bail!("need --prompt, --prompt-ids, or --ppl");
     };
     if prompt_ids.is_empty() {
         bail!("empty prompt");
@@ -71,6 +73,43 @@ fn main() -> Result<()> {
     // ~zero cross-layer correlation; wrong prefetches evict good entries
     // and triple disk traffic. Kept for experiments.
     dec.prefetch_next = arg(&args, "prefetch-next").as_deref() == Some("1");
+
+    // Perplexity mode: teacher-forced NLL over a text file. Validates the
+    // whole pipeline numerically — and PPL must be identical across cache
+    // sizes if paging is lossless.
+    if let Some(ppl_file) = arg(&args, "ppl") {
+        let tok = tokenizer.as_ref().context("--ppl requires --tokenizer")?;
+        let text = std::fs::read_to_string(&ppl_file).context("reading --ppl file")?;
+        let ids = tok
+            .encode(text.as_str(), false)
+            .map_err(|e| anyhow::anyhow!("encode: {e}"))?
+            .get_ids()
+            .to_vec();
+        let n = ids.len().min(max_seq);
+        if n < 2 {
+            bail!("--ppl text too short");
+        }
+        eprintln!("ppl: {n} tokens");
+        let t0 = Instant::now();
+        let mut nll = 0f64;
+        for pos in 0..n - 1 {
+            dec.step(ids[pos], pos, true)?;
+            let logits = dec.last_logits();
+            let target = ids[pos + 1] as usize;
+            let m = logits.iter().cloned().fold(f32::MIN, f32::max);
+            let z: f64 = logits.iter().map(|v| ((v - m) as f64).exp()).sum();
+            nll -= (logits[target] - m) as f64 - z.ln();
+        }
+        let count = (n - 1) as f64;
+        println!(
+            "ppl: {:.4} over {} tokens ({:.3} bits/token, {:.2} tok/s)",
+            (nll / count).exp(),
+            n - 1,
+            nll / count / std::f64::consts::LN_2,
+            count / t0.elapsed().as_secs_f64(),
+        );
+        return Ok(());
+    }
 
     // Prefill: feed prompt tokens; logits of the last one seed generation.
     eprintln!("prefill: {} tokens", prompt_ids.len());

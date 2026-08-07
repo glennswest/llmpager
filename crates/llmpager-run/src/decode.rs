@@ -275,6 +275,11 @@ impl Decoder {
         self.pager.metrics()
     }
 
+    /// The full logits of the last `step(_, _, true)` call (f32, vocab-sized).
+    pub fn last_logits(&self) -> Vec<f32> {
+        f32_from_le(&self.logits_host)
+    }
+
     /// Queue handles for release once the compute stream passes an event
     /// recorded now. The event ring is small; when it wraps we block on the
     /// oldest entry (bounded pipeline depth, typically never hit).
