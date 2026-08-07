@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.7.0] — 2026-08-07
+
+M5: multi-model serving. Two 30B MoE models warm simultaneously on one
+16GB GPU, routed by the OpenAI `model:` field.
+
+### Added
+- Multi-model registry in `llmpager-serve`: JSON config (`deploy/serve.json`),
+  lazy warm-up, LRU eviction, evict-all retry under VRAM pressure
+- Full VRAM reclaim on model unload: Pager frees its slot arenas and
+  events, Decoder frees buffers/KV/core (tied-embedding safe)
+- Both Qwen3 packs served at 24 slots each (13-14 tok/s per model);
+  `/v1/models` reports per-model warm state
+
 ## [v0.6.0] — 2026-08-07
 
 M4: serving. llmpager is now a network service on ai.g8.lo.

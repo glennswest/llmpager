@@ -105,12 +105,14 @@ Version locations (must all match):
 - [x] Deployment unit: systemd `llmpager.service` on ai.g8.lo, port 8090,
       base model + RAM tier; verified over the network from the Mac
 
-### M5 — Multi-model
+### M5 — Multi-model (in progress)
+- [x] Model registry: serve.json config, `model:` routing, lazy warm-up,
+      LRU eviction with full VRAM reclaim (Pager/Decoder Drop free all
+      device memory); evict-all retry on VRAM pressure
+- [x] Both 30B packs warm simultaneously on 16GB (24 slots each,
+      13-14 tok/s each); verified live on ai.g8.lo:8090
 - [ ] Global VRAM budgeter: per-model expert-cache autosizing by activity
       (busy models grow slots, idle models shrink toward zero)
-- [ ] Pageable resident cores: load/unload a model's core on demand
-      (~0.5s switch at 4 GB/s; N models installed, K warm)
-- [ ] Model registry; serving routes `model:` to the right pager instance
 - [ ] Disk-bandwidth arbitration between concurrently faulting models
 
 ## Session Log
