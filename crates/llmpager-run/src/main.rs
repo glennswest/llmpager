@@ -23,8 +23,10 @@ fn main() -> Result<()> {
     let slots: u32 = arg(&args, "slots").and_then(|v| v.parse().ok()).unwrap_or(32);
     let io_threads: usize = arg(&args, "io-threads").and_then(|v| v.parse().ok()).unwrap_or(4);
     let max_seq: usize = arg(&args, "max-seq").and_then(|v| v.parse().ok()).unwrap_or(4096);
-    // Core GEMV encoding: q4 (quantized at load, ~4x less bandwidth) or bf16.
-    let core_q4 = arg(&args, "core-dtype").as_deref().unwrap_or("q4") != "bf16";
+    // Core GEMV encoding. Default bf16: measured faster than q4 (the q4
+    // kernel's unpack cost eats the bandwidth win) and greedy output drifts
+    // under double quantization. --core-dtype=q4 kept for experiments.
+    let core_q4 = arg(&args, "core-dtype").as_deref() == Some("q4");
 
     // Tokenizer is optional: --prompt-ids allows raw-id smoke tests.
     let tokenizer = match arg(&args, "tokenizer") {

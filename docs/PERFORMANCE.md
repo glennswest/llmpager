@@ -91,6 +91,25 @@ Now a CUDA event is recorded after each layer's expert kernels and
 handles are released lazily once the stream passes it — the pipeline
 stays deep. Decode: 31.1 → 33.1 tok/s.
 
+### 7. Core q4 quantization (M3) — rejected, kept the data
+
+Hypothesis: the resident core streams ~4.3GB bf16 per token; re-quantizing
+it to q4 at load (→ ~1.1GB) should be the biggest remaining win.
+
+Measured: **25.9 tok/s — slower than the 33.1 bf16 baseline**, and the
+greedy decode path drifted (first token changed) from double quantization.
+Two lessons:
+
+1. Bandwidth ratios only convert to speed if the kernels are equally
+   efficient: our q4 GEMV sustains 122 GB/s (nibble-unpack ALU bound)
+   while the bf16 GEMV runs at near-VRAM bandwidth — 1.1GB at 122 GB/s
+   loses to 4.3GB at ~400 GB/s.
+2. Core weights are quality-critical (attention + lm_head touch every
+   logit); experts tolerate q4 far better than the shared trunk does.
+
+Kept behind `--core-dtype=q4`; becomes interesting again only if the q4
+kernel reaches ~300+ GB/s (half2 math, dual-issue unpack — future work).
+
 ### Fixed along the way
 
 - **VRAM allocation granularity**: 3,072 individual ~2.5MB slot buffers

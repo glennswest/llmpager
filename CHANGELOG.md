@@ -53,3 +53,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 ### 2026-08-07
 - **docs:** docs/PERFORMANCE.md — running performance journey (technique → measurement), presentation source material
 - **docs:** PERFORMANCE.md appendix — one-day timeline and details mined from the session transcript
+- **perf:** Core q4 experiment measured and rejected (25.9 vs 33.1 tok/s; greedy drift) — kept behind --core-dtype=q4; findings in PERFORMANCE.md
