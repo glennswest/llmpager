@@ -54,6 +54,11 @@ pub struct Decoder {
     down_off: u64,
     logits_host: Vec<u8>,
     router_host: Vec<u8>,
+    // Deferred expert-handle release: handles stay pinned until the compute
+    // stream passes the recorded event, so no per-layer sync is needed.
+    release_events: Vec<llmpager_cuda::driver::CUevent>,
+    pending_release: std::collections::VecDeque<(usize, Vec<llmpager_cuda::pager::ExpertHandle>)>,
+    next_event: usize,
 }
 
 impl Decoder {
@@ -118,6 +123,9 @@ impl Decoder {
             down_off: 32 + 2 * gate_bytes,
             logits_host: vec![0u8; cfg.vocab * 4],
             router_host: vec![0u8; cfg.experts * 4],
+            release_events: (0..8).map(|_| cuda.event()).collect::<Result<_>>()?,
+            pending_release: std::collections::VecDeque::new(),
+            next_event: 0,
             cuda,
             kernels,
             stream,
@@ -190,12 +198,11 @@ impl Decoder {
                 ke.q4g64_gemv(cu, b + self.down_off, self.act_out, self.expert_out, hid, c.moe_inter as i32, st)?;
                 ke.scale_add(cu, self.moe_acc, self.expert_out, *weight, hid, st)?;
             }
-            // Handles pin cache slots; the enqueued GEMVs must finish before
-            // a release lets a new fetch overwrite the slot (M3: events).
-            cu.sync_stream(st)?;
-            for h in handles {
-                self.pager.release(h);
-            }
+            // Handles pin cache slots; a release must not let a new fetch
+            // overwrite a slot the enqueued GEMVs haven't read yet. Record
+            // an event after this layer's expert kernels and defer the
+            // release until the stream has passed it — no sync needed.
+            self.defer_release(handles)?;
             ke.add(cu, self.h, self.moe_acc, hid, st)?;
         }
 
@@ -217,6 +224,39 @@ impl Decoder {
 
     pub fn pager_metrics(&self) -> llmpager_cuda::pager::Metrics {
         self.pager.metrics()
+    }
+
+    /// Queue handles for release once the compute stream passes an event
+    /// recorded now. The event ring is small; when it wraps we block on the
+    /// oldest entry (bounded pipeline depth, typically never hit).
+    fn defer_release(
+        &mut self,
+        handles: Vec<llmpager_cuda::pager::ExpertHandle>,
+    ) -> Result<()> {
+        // Drain everything already complete.
+        while let Some((ev_idx, _)) = self.pending_release.front() {
+            if self.cuda.event_done(self.release_events[*ev_idx])? {
+                let (_, done) = self.pending_release.pop_front().unwrap();
+                for h in done {
+                    self.pager.release(h);
+                }
+            } else {
+                break;
+            }
+        }
+        // If the ring slot we want is still pending, wait it out.
+        if self.pending_release.len() == self.release_events.len() {
+            let (ev_idx, done) = self.pending_release.pop_front().unwrap();
+            self.cuda.sync_event(self.release_events[ev_idx])?;
+            for h in done {
+                self.pager.release(h);
+            }
+        }
+        let ev = self.next_event;
+        self.next_event = (self.next_event + 1) % self.release_events.len();
+        self.cuda.record_event(self.release_events[ev], self.stream)?;
+        self.pending_release.push_back((ev, handles));
+        Ok(())
     }
 }
 

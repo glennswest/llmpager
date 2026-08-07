@@ -42,6 +42,7 @@ pub struct Cuda {
     event_create: unsafe extern "C" fn(*mut CUevent, u32) -> CUresult,
     event_record: unsafe extern "C" fn(CUevent, CUstream) -> CUresult,
     event_sync: unsafe extern "C" fn(CUevent) -> CUresult,
+    event_query: unsafe extern "C" fn(CUevent) -> CUresult,
     ctx_set: unsafe extern "C" fn(CUcontext) -> CUresult,
     ctx_sync: unsafe extern "C" fn() -> CUresult,
     module_load_data: unsafe extern "C" fn(*mut CUmodule, *const u8) -> CUresult,
@@ -95,6 +96,7 @@ impl Cuda {
                 event_create: *lib.get(b"cuEventCreate")?,
                 event_record: *lib.get(b"cuEventRecord")?,
                 event_sync: *lib.get(b"cuEventSynchronize")?,
+                event_query: *lib.get(b"cuEventQuery")?,
                 ctx_set,
                 ctx_sync: *lib.get(b"cuCtxSynchronize")?,
                 module_load_data: *lib.get(b"cuModuleLoadData")?,
@@ -181,6 +183,16 @@ impl Cuda {
     pub fn sync_event(&self, e: CUevent) -> Result<()> {
         unsafe { cu!(cuEventSynchronize, (self.event_sync)(e)) };
         Ok(())
+    }
+
+    /// Non-blocking: has the event completed? (CUDA_ERROR_NOT_READY => false)
+    pub fn event_done(&self, e: CUevent) -> Result<bool> {
+        let rc = unsafe { (self.event_query)(e) };
+        match rc {
+            0 => Ok(true),
+            600 => Ok(false), // CUDA_ERROR_NOT_READY
+            other => bail!("cuEventQuery failed: CUDA error {other}"),
+        }
     }
 
     /// All future work on `s` waits for `e` — device-side, no host block.
