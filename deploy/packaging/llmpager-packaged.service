@@ -1,0 +1,13 @@
+[Unit]
+Description=llmpager OpenAI-compatible MoE paging server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/llmpager-serve --config=/etc/llmpager/serve.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

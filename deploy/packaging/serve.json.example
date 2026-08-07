@@ -1,0 +1,15 @@
+{
+  "port": 8090,
+  "max_warm": 2,
+  "models": [
+    {
+      "name": "my-model",
+      "pack": "/var/lib/llmpager/my-model.llmpk",
+      "core": "/var/lib/llmpager/my-model.core.safetensors",
+      "tokenizer": "/var/lib/llmpager/my-model",
+      "slots": 24,
+      "slots_solo": 48,
+      "direct": false
+    }
+  ]
+}
