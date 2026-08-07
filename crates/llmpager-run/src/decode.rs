@@ -157,7 +157,10 @@ impl Decoder {
     }
 
     /// Run one token at `pos`; returns the argmax over the vocab (greedy).
-    pub fn step(&mut self, token: u32, pos: usize) -> Result<u32> {
+    /// `want_logits: false` (prefill except the last prompt token) skips the
+    /// final norm + lm_head + readback — the KV cache update is the only
+    /// side effect needed.
+    pub fn step(&mut self, token: u32, pos: usize, want_logits: bool) -> Result<u32> {
         if pos >= self.max_seq {
             bail!("position {pos} exceeds max_seq {}", self.max_seq);
         }
@@ -235,6 +238,9 @@ impl Decoder {
             self.defer_release(handles)?;
         }
 
+        if !want_logits {
+            return Ok(0);
+        }
         ke.rmsnorm(cu, self.h, self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
         mat_gemv(ke, cu, &self.core.lm_head, self.h_norm, self.logits, st)?;
         cu.dtoh_async(&mut self.logits_host, self.logits, st)?;

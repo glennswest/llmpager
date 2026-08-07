@@ -70,7 +70,8 @@ fn main() -> Result<()> {
     let t0 = Instant::now();
     let mut next = 0u32;
     for (pos, id) in prompt_ids.iter().enumerate() {
-        next = dec.step(*id, pos)?;
+        let last = pos + 1 == prompt_ids.len();
+        next = dec.step(*id, pos, last)?;
     }
     let prefill_s = t0.elapsed().as_secs_f64();
 
@@ -92,7 +93,7 @@ fn main() -> Result<()> {
         if pos >= max_seq {
             break;
         }
-        next = dec.step(next, pos)?;
+        next = dec.step(next, pos, true)?;
     }
     let gen_s = t1.elapsed().as_secs_f64();
     if tokenizer.is_none() {
