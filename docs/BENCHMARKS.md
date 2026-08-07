@@ -106,6 +106,24 @@ Notes:
   cuMemAllocs round up to allocation granularity and waste ~60% VRAM
   (found as OOM at 64 slots; fixed).
 
+## M3 progress — 2026-08-07, ai.g8.lo
+
+Same Qwen3-30B-A3B greedy decode (48 slots):
+
+| Change | Decode tok/s |
+|---|---|
+| M2 baseline (scalar kernels, per-layer sync) | 19.9 |
+| + vectorized GEMVs (uint/float4, uint4 bf16) | 31.1 |
+| + event-based deferred handle release | **33.1** |
+
+Kernel microbenchmarks after vectorization: q4g64 GEMV 121.7 GB/s
+(was 35.4); bf16 GEMV 1.7 TB/s on an L2-resident 16.8MB matrix — i.e.
+VRAM-bandwidth-bound in real use, no longer the bottleneck.
+
+Remaining per-token costs (~30ms): 48 router dtoh round-trips, expert
+misses (~10% at 48 slots), core bf16 streaming (~4.3GB/token — quantizing
+the core is the biggest open win), per-expert launch overhead.
+
 ### Read-through for the design
 
 - The miss path costs ~0.7-1ms per 3MB expert (read) + ~0.12ms (H2D) —

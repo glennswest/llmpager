@@ -83,10 +83,18 @@ Version locations (must all match):
 - [ ] Qwen3-Coder-30B-A3B pack (download in progress, watcher armed)
 - [ ] Perplexity/logits sanity check vs reference implementation
 
-### M3 — Performance
-- [ ] Overlap tuning (double-buffering, per-layer prefetch depth)
-- [ ] Optional GPUDirect Storage (cuFile) path
+### M3 — Performance (in progress)
+- [x] Vectorized GEMV kernels (16B loads): q4g64 35→122 GB/s, bf16 no
+      longer the limiter; decode 19.9 → 31.1 tok/s
+- [x] Event-based deferred expert-handle release (per-layer stream sync
+      removed): 31.1 → 33.1 tok/s
+- [ ] Reduce host round-trips: GPU router top-k (or batched dtoh), fewer
+      per-layer syncs; profile launch count
+- [ ] Batched per-layer expert GEMV (one launch for all top-k experts)
 - [ ] Speculative expert prefetch (reuse-distance / gate-estimate heuristics)
+- [ ] Quantize resident core to q4 (core streaming is ~4.3GB/token bf16 —
+      biggest remaining bandwidth term)
+- [ ] Optional GPUDirect Storage (cuFile) path
 - [ ] tokens/sec + hit-rate benchmarks vs cache size
 
 ### M4 — Serving
