@@ -49,3 +49,6 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 
 ## [Unreleased]
 <!-- New unreleased changes go here -->
+
+### 2026-08-07
+- **docs:** docs/PERFORMANCE.md — running performance journey (technique → measurement), presentation source material
