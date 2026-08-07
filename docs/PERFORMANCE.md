@@ -97,6 +97,37 @@ stays deep. Decode: 31.1 → 33.1 tok/s.
   rounded up to ~4MB each inside the driver — ~60% of the cache budget
   wasted, discovered as an OOM. Per-layer arena allocations fixed it.
 
+## Appendix: the one-day timeline
+
+Wall-clock milestones mined from the session transcript (2026-08-06,
+times local). The project went from a wedged GPU and an empty repo to a
+released paging engine with real tokens in about eight hours:
+
+| Time | Event |
+|---|---|
+| 16:04 | Session start: empty repo, ai.g8.lo unreachable |
+| 16:11 | VM start fails: `vfio ... error getting device from group 13` — GPU wedged, then falls off the PCI bus entirely during recovery attempts |
+| 16:19 | Host reboot #1 — failure reproduces from clean boot (not a transient) |
+| 16:24 | Community search matches the exact signature: Blackwell D3cold vfio bug (Proxmox #7374); fix is `vfio_pci.disable_idle_d3=1` |
+| 16:30 | Reboot #2 with fix baked into initramfs: GPU holds D0 |
+| 16:33 | `nvidia-smi` healthy inside the guest (after fixing DKMS kernel/header drift) |
+| 16:57 | M0 measured: disk 4.34 GB/s O_DIRECT, pinned H2D 25.3 GB/s, 104 tok/s paging ceiling @ 48 slots |
+| 17:11 | M1 async pager: prefetch=1 → +42%, 113 tok/s ceiling |
+| 17:45 | First custom CUDA kernel verified on Blackwell (q4g64 GEMV, rel err 5.2e-6, 35 GB/s scalar) |
+| 18:02 | Full decode kernel set verified (7 kernels, worst rel err 1.9e-6) |
+| 19:00 | Qwen3-30B-A3B converted in 21s; **first real tokens: "…Paris."** at 19.9 tok/s |
+| +next session | Vectorized GEMVs → 31.1 tok/s; event-ring release → 33.1 tok/s; v0.2.0 and v0.3.0 tagged |
+
+Presentation-worthy details preserved in the transcript:
+- The GPU "pending transaction" FLR timeouts that *looked* like a wedged
+  card were actually the D3cold power state making config space
+  unreachable — the same fix cured both symptoms.
+- M0's paged-fetch latency histogram: >99% of 3MB expert fetches
+  complete in <2ms; no tail beyond 5ms in any run all day.
+- 8 io threads through one virtio-scsi queue measured *slower* than 1
+  thread (3.60 vs 4.34 GB/s) — queue contention, which shaped the
+  pager's "few deep readers" design.
+
 ## Next levers (measured, not guessed)
 
 Per-token cost model at 33 tok/s (~30ms/token):
