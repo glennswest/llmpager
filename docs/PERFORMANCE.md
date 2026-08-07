@@ -27,7 +27,10 @@ experts per layer from NVMe through a VRAM LFU cache.
 | 08-06 | M1: async pager + 1-layer prefetch | paging ceiling (no compute) | **113 tok/s** |
 | 08-07 | M2: first real decode (scalar kernels) | real decode | 19.9 tok/s |
 | 08-07 | M3: vectorized GEMV kernels | real decode | 31.1 tok/s |
-| 08-07 | M3: event-based deferred handle release | real decode | **33.1 tok/s** |
+| 08-07 | M3: event-based deferred handle release | real decode | 33.1 tok/s |
+| 08-07 | M3: batched MoE launches | real decode | **34.8 tok/s** |
+| 08-07 | (rejected) core q4 | real decode | 25.9 tok/s ✗ |
+| 08-07 | (rejected) cross-layer prefetch | real decode (cold prompt) | 10.8 vs 18.5 tok/s ✗ |
 
 The gap between 33 tok/s real decode and the 113 tok/s paging ceiling is
 the remaining M3 headroom — the pager can already feed experts 3× faster
@@ -109,6 +112,34 @@ Two lessons:
 
 Kept behind `--core-dtype=q4`; becomes interesting again only if the q4
 kernel reaches ~300+ GB/s (half2 math, dual-issue unpack — future work).
+
+### 8. Batched MoE launches (M3) — +5-9%
+
+Each layer's 8 experts ran as 24+ serialized small GEMVs (768 rows each —
+a fraction of the GPU). Now one launch per projection stage covers all
+top-k experts (`grid.y` = expert, device array of blob addresses), the
+silu-mul runs over all experts at once, and a `moe_reduce` kernel does the
+weighted accumulate. 33.1 → **34.8 tok/s**, byte-identical output.
+
+### 9. Prefill lm_head skip
+
+Prefill computed the full 620MB lm_head projection for every prompt token
+and discarded it; now only the last prompt token pays. Measured effect was
+small — which itself was the finding: prefill is **cold-cache-bound**
+(every early token faults most of its experts), not compute-bound. Prefill
+optimization is a paging problem, not a kernel problem.
+
+### 10. Cross-layer speculative prefetch — rejected, kept the data
+
+Heuristic: prefetch layer L+1's experts using layer L's routed ids.
+Measured on a cold prompt: **18.5 → 10.8 tok/s**, hit rate 77% → 67%,
+disk traffic 12.6 → 35.3 GB. Qwen3-MoE's expert choice is effectively
+uncorrelated across layers, so ~90% of prefetches were wrong — and wrong
+prefetches are worse than nothing because they evict genuinely hot
+entries and saturate the disk. Lesson: in a paging system, *bad prefetch
+is cache pollution plus bandwidth theft*; the temporal reuse the LFU
+already captures (same layer, recent tokens) is the signal that works.
+`--prefetch-next=1` keeps the experiment reproducible.
 
 ### Fixed along the way
 

@@ -64,7 +64,10 @@ fn main() -> Result<()> {
         max_seq,
         core_q4,
     )?;
-    dec.prefetch_next = arg(&args, "prefetch-next").as_deref() != Some("0");
+    // Default off: measured 18.5 -> 10.8 tok/s. Qwen3 expert routing has
+    // ~zero cross-layer correlation; wrong prefetches evict good entries
+    // and triple disk traffic. Kept for experiments.
+    dec.prefetch_next = arg(&args, "prefetch-next").as_deref() == Some("1");
 
     // Prefill: feed prompt tokens; logits of the last one seed generation.
     eprintln!("prefill: {} tokens", prompt_ids.len());
