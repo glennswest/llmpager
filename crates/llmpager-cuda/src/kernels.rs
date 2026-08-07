@@ -13,6 +13,7 @@ macro_rules! params {
     }};
 }
 
+#[derive(Clone, Copy)]
 pub struct Kernels {
     q4g64_gemv: CUfunction,
     rmsnorm_f32: CUfunction,

@@ -141,8 +141,12 @@ impl Decoder {
         if pos >= self.max_seq {
             bail!("position {pos} exceeds max_seq {}", self.max_seq);
         }
-        let c = &self.cfg;
-        let (cu, ke, st) = (&self.cuda, &self.kernels, self.stream);
+        let c = self.cfg.clone();
+        let cu = Arc::clone(&self.cuda);
+        let cu = &*cu;
+        let ke = self.kernels;
+        let ke = &ke;
+        let st = self.stream;
         let qkv = (c.heads * c.head_dim) as i32;
         let kvd = (c.kv_heads * c.head_dim) as i32;
         let hid = c.hidden as i32;
