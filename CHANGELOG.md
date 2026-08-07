@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.5.0] — 2026-08-07
+
+The RAM tier: `--direct=0` serves the pack from the OS page cache when it
+fits in host RAM — VRAM misses cost a memory copy, not a disk read.
+Decode 34.8 → 37.6 tok/s warm-routing, 20.4 → 32.2 tok/s cold-routing,
+prefill ~2x. Slot-sweep results on the real model recorded.
+
+### Added
+- `PagerConfig.direct` / `llmpager-run --direct=0` — page-cache RAM tier
+- Real-model cache sweep (24/32/48/64 slots x warm/cold prompts) in docs
+- README status refreshed with current headline numbers
+
 ## [v0.4.0] — 2026-08-07
 
 Decode 33.1 → ~34.8 tok/s; two heuristics measured and rejected with data.

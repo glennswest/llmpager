@@ -28,9 +28,10 @@ experts per layer from NVMe through a VRAM LFU cache.
 | 08-07 | M2: first real decode (scalar kernels) | real decode | 19.9 tok/s |
 | 08-07 | M3: vectorized GEMV kernels | real decode | 31.1 tok/s |
 | 08-07 | M3: event-based deferred handle release | real decode | 33.1 tok/s |
-| 08-07 | M3: batched MoE launches | real decode | **34.8 tok/s** |
+| 08-07 | M3: batched MoE launches | real decode | 34.8 tok/s |
 | 08-07 | (rejected) core q4 | real decode | 25.9 tok/s ✗ |
 | 08-07 | (rejected) cross-layer prefetch | real decode (cold prompt) | 10.8 vs 18.5 tok/s ✗ |
+| 08-07 | M3: RAM tier (page cache, `--direct=0`) | real decode | **37.6 tok/s** (32.2 on cold prompts) |
 
 The gap between 33 tok/s real decode and the 113 tok/s paging ceiling is
 the remaining M3 headroom — the pager can already feed experts 3× faster
@@ -140,6 +141,27 @@ entries and saturate the disk. Lesson: in a paging system, *bad prefetch
 is cache pollution plus bandwidth theft*; the temporal reuse the LFU
 already captures (same layer, recent tokens) is the signal that works.
 `--prefetch-next=1` keeps the experiment reproducible.
+
+### 11. The RAM tier (M3/M5) — +13-58%, biggest single decode win
+
+"Do we need the memory tier?" Measured answer: yes, decisively — *when
+the pack fits in host RAM*. The 30B pack is 15.4GB; the box has 64GB.
+O_DIRECT (correct for huge packs) was deliberately starving a resource we
+had: with `--direct=0` the OS page cache becomes a full RAM tier, and a
+VRAM miss costs a ~25 GB/s memory copy instead of a 4 GB/s disk read.
+
+| Prompt class | disk-backed | RAM tier (warm) |
+|---|---|---|
+| cold routing (haiku) | 20.4 tok/s | **32.2 tok/s** |
+| warm routing (capitals) | 33.3 tok/s | **37.6 tok/s** |
+| prefill | 7-9 tok/s | **12-17 tok/s** |
+
+The hierarchy is now VRAM cache (hits, free) → RAM (misses, ~1ms) →
+NVMe (first touch only). Cold prompts — precisely the ones the VRAM
+cache handles worst — gain the most, because every miss got 6× cheaper.
+For Kimi-class packs (550GB ≫ RAM) this becomes the explicit pinned
+partial RAM tier in the M5 design; for anything that fits in RAM, the
+page cache already does the job with zero code.
 
 ### Fixed along the way
 

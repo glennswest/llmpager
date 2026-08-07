@@ -36,8 +36,13 @@ Linux hosts with NVIDIA GPUs and CUDA.
 
 ## Status
 
-Early development (`0.x`). See `CLAUDE.md` for the work plan and
-`docs/DESIGN.md` for the architecture.
+Working (`0.x`, API unstable). On an RTX 5060 Ti 16GB, Qwen3-30B-A3B
+(18.5GB of q4 weights) decodes coherently at **~38 tok/s** greedy with a
+48-slot/layer expert cache (89% hit rate) and the pack served from a RAM
+tier; Qwen3-Coder-30B-A3B runs as a second model through the same engine.
+The performance journey — every technique, measurement, and rejected
+experiment — is in `docs/PERFORMANCE.md`; architecture in
+`docs/DESIGN.md`; work plan in `CLAUDE.md`.
 
 ## Requirements
 
