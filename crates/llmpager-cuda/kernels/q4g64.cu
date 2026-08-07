@@ -48,19 +48,28 @@ extern "C" __global__ void q4g64_gemv_batch(
             reinterpret_cast<const unsigned int*>(data + (size_t)row * (cols >> 1) + (size_t)g * 32);
         const float4* x4 = reinterpret_cast<const float4*>(xe + g * 64);
         float sum = 0.f;
+        // fp16 magic-number unpack: OR nibbles into the fp16 mantissa at
+        // exponent 1024 (0x6400), subtract 1032 (= 1024 + zero-point 8) in
+        // half2 — two dequantized values per 3 ALU ops instead of ~10.
+        // Pair layout: (b & 0x000F000F) yields values (v0, v4), etc.
+        const __half2 bias = __floats2half2_rn(1032.f, 1032.f);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             const unsigned int b = dp[i];
             const float4 xa = x4[2 * i];
             const float4 xb = x4[2 * i + 1];
-            sum += (float)((int)((b >> 0) & 0xFu) - 8) * xa.x;
-            sum += (float)((int)((b >> 4) & 0xFu) - 8) * xa.y;
-            sum += (float)((int)((b >> 8) & 0xFu) - 8) * xa.z;
-            sum += (float)((int)((b >> 12) & 0xFu) - 8) * xa.w;
-            sum += (float)((int)((b >> 16) & 0xFu) - 8) * xb.x;
-            sum += (float)((int)((b >> 20) & 0xFu) - 8) * xb.y;
-            sum += (float)((int)((b >> 24) & 0xFu) - 8) * xb.z;
-            sum += (float)((int)((b >> 28) & 0xFu) - 8) * xb.w;
+            unsigned int t0 = (b & 0x000F000Fu) | 0x64006400u;
+            unsigned int t1 = ((b >> 4) & 0x000F000Fu) | 0x64006400u;
+            unsigned int t2 = ((b >> 8) & 0x000F000Fu) | 0x64006400u;
+            unsigned int t3 = ((b >> 12) & 0x000F000Fu) | 0x64006400u;
+            const float2 v0 = __half22float2(__hsub2(*reinterpret_cast<__half2*>(&t0), bias));
+            const float2 v1 = __half22float2(__hsub2(*reinterpret_cast<__half2*>(&t1), bias));
+            const float2 v2 = __half22float2(__hsub2(*reinterpret_cast<__half2*>(&t2), bias));
+            const float2 v3 = __half22float2(__hsub2(*reinterpret_cast<__half2*>(&t3), bias));
+            sum += v0.x * xa.x + v0.y * xb.x;
+            sum += v1.x * xa.y + v1.y * xb.y;
+            sum += v2.x * xa.z + v2.y * xb.z;
+            sum += v3.x * xa.w + v3.y * xb.w;
         }
         acc += sf * sum;
     }
@@ -115,19 +124,28 @@ extern "C" __global__ void q4g64_gemv(
             reinterpret_cast<const unsigned int*>(data + (size_t)row * (cols >> 1) + (size_t)g * 32);
         const float4* x4 = reinterpret_cast<const float4*>(x + g * 64);
         float sum = 0.f;
+        // fp16 magic-number unpack: OR nibbles into the fp16 mantissa at
+        // exponent 1024 (0x6400), subtract 1032 (= 1024 + zero-point 8) in
+        // half2 — two dequantized values per 3 ALU ops instead of ~10.
+        // Pair layout: (b & 0x000F000F) yields values (v0, v4), etc.
+        const __half2 bias = __floats2half2_rn(1032.f, 1032.f);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             const unsigned int b = dp[i];
             const float4 xa = x4[2 * i];
             const float4 xb = x4[2 * i + 1];
-            sum += (float)((int)((b >> 0) & 0xFu) - 8) * xa.x;
-            sum += (float)((int)((b >> 4) & 0xFu) - 8) * xa.y;
-            sum += (float)((int)((b >> 8) & 0xFu) - 8) * xa.z;
-            sum += (float)((int)((b >> 12) & 0xFu) - 8) * xa.w;
-            sum += (float)((int)((b >> 16) & 0xFu) - 8) * xb.x;
-            sum += (float)((int)((b >> 20) & 0xFu) - 8) * xb.y;
-            sum += (float)((int)((b >> 24) & 0xFu) - 8) * xb.z;
-            sum += (float)((int)((b >> 28) & 0xFu) - 8) * xb.w;
+            unsigned int t0 = (b & 0x000F000Fu) | 0x64006400u;
+            unsigned int t1 = ((b >> 4) & 0x000F000Fu) | 0x64006400u;
+            unsigned int t2 = ((b >> 8) & 0x000F000Fu) | 0x64006400u;
+            unsigned int t3 = ((b >> 12) & 0x000F000Fu) | 0x64006400u;
+            const float2 v0 = __half22float2(__hsub2(*reinterpret_cast<__half2*>(&t0), bias));
+            const float2 v1 = __half22float2(__hsub2(*reinterpret_cast<__half2*>(&t1), bias));
+            const float2 v2 = __half22float2(__hsub2(*reinterpret_cast<__half2*>(&t2), bias));
+            const float2 v3 = __half22float2(__hsub2(*reinterpret_cast<__half2*>(&t3), bias));
+            sum += v0.x * xa.x + v0.y * xb.x;
+            sum += v1.x * xa.y + v1.y * xb.y;
+            sum += v2.x * xa.z + v2.y * xb.z;
+            sum += v3.x * xa.w + v3.y * xb.w;
         }
         acc += sf * sum;
     }
