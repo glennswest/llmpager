@@ -28,7 +28,10 @@ struct ModelSpec {
     pack: PathBuf,
     core: PathBuf,
     tokenizer: PathBuf,
+    /// Cache size when sharing VRAM with other warm models.
     slots: u32,
+    /// Cache size when this is the only warm model (budgeter grows it).
+    slots_solo: u32,
     io_threads: usize,
     direct: bool,
 }
@@ -36,6 +39,7 @@ struct ModelSpec {
 struct Engine {
     dec: Decoder,
     tok: tokenizers::Tokenizer,
+    cur_slots: u32,
 }
 
 struct Registry {
@@ -53,6 +57,25 @@ impl Registry {
             .with_context(|| format!("unknown model {name}"))
     }
 
+    /// Resize every warm model's cache to its target for `count` warm
+    /// models: solo models get the big cache, sharers the small one.
+    fn rebalance(&mut self, count: usize) -> Result<()> {
+        for (name, engine) in &mut self.warm {
+            let spec = self
+                .specs
+                .iter()
+                .find(|s| &s.name == name)
+                .expect("warm model has a spec");
+            let want = if count <= 1 { spec.slots_solo } else { spec.slots };
+            if engine.cur_slots != want {
+                eprintln!("budgeter: {name} cache {} -> {want} slots", engine.cur_slots);
+                engine.dec.resize_cache(want)?;
+                engine.cur_slots = want;
+            }
+        }
+        Ok(())
+    }
+
     /// Warm the named model, evicting LRU entries as needed, and move it to
     /// the front. Returns its index in `warm` (always 0).
     fn warm_up(&mut self, name: &str) -> Result<usize> {
@@ -67,8 +90,13 @@ impl Registry {
             drop(engine);
             eprintln!("evicted model {evicted}");
         }
+        // Shrink current residents before loading another mouth to feed.
+        let count_after = self.warm.len() + 1;
+        self.rebalance(count_after)?;
+        let slots = if count_after <= 1 { spec.slots_solo } else { spec.slots };
+
         let t0 = Instant::now();
-        let load = |spec: &ModelSpec| -> Result<Engine> {
+        let load = |spec: &ModelSpec, slots: u32| -> Result<Engine> {
             let tok_file = if spec.tokenizer.is_dir() {
                 spec.tokenizer.join("tokenizer.json")
             } else {
@@ -77,11 +105,11 @@ impl Registry {
             let tok = tokenizers::Tokenizer::from_file(&tok_file)
                 .map_err(|e| anyhow::anyhow!("loading {}: {e}", tok_file.display()))?;
             let dec = Decoder::new(
-                &spec.pack, &spec.core, spec.slots, spec.io_threads, 4096, false, spec.direct,
+                &spec.pack, &spec.core, slots, spec.io_threads, 4096, false, spec.direct,
             )?;
-            Ok(Engine { dec, tok })
+            Ok(Engine { dec, tok, cur_slots: slots })
         };
-        let engine = match load(&spec) {
+        let engine = match load(&spec, slots) {
             Ok(e) => e,
             Err(first_err) => {
                 // Likely VRAM pressure: drop everything warm and retry once.
@@ -90,11 +118,14 @@ impl Registry {
                 }
                 eprintln!("load of {name} failed ({first_err:#}); evicting all warm models and retrying");
                 self.warm.clear();
-                load(&spec)?
+                load(&spec, self.spec(name)?.slots_solo)?
             }
         };
-        eprintln!("loaded model {name} in {:.1}s", t0.elapsed().as_secs_f64());
+        eprintln!("loaded model {name} ({} slots) in {:.1}s", engine.cur_slots, t0.elapsed().as_secs_f64());
         self.warm.insert(0, (name.to_string(), engine));
+        // If eviction/retry left us solo, grow back.
+        let n = self.warm.len();
+        self.rebalance(n)?;
         Ok(0)
     }
 }
@@ -174,6 +205,10 @@ fn main() -> Result<()> {
                 core: PathBuf::from(m["core"].as_str().context("model core")?),
                 tokenizer: PathBuf::from(m["tokenizer"].as_str().context("model tokenizer")?),
                 slots: m["slots"].as_u64().unwrap_or(32) as u32,
+                slots_solo: m["slots_solo"]
+                    .as_u64()
+                    .map(|v| v as u32)
+                    .unwrap_or(2 * m["slots"].as_u64().unwrap_or(32) as u32),
                 io_threads: m["io_threads"].as_u64().unwrap_or(4) as usize,
                 direct: m["direct"].as_bool().unwrap_or(false),
             })
@@ -224,9 +259,14 @@ fn handle(
                 .specs
                 .iter()
                 .map(|s| {
-                    let warm = r.warm.iter().any(|(n, _)| n == &s.name);
+                    let slots = r
+                        .warm
+                        .iter()
+                        .find(|(n, _)| n == &s.name)
+                        .map(|(_, e)| e.cur_slots);
                     serde_json::json!({"id": s.name, "object": "model",
-                                        "owned_by": "llmpager", "warm": warm})
+                                        "owned_by": "llmpager",
+                                        "warm": slots.is_some(), "slots": slots})
                 })
                 .collect();
             Ok(serde_json::json!({"object": "list", "data": data}))

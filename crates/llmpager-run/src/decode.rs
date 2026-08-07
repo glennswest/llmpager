@@ -44,7 +44,10 @@ pub struct Decoder {
     stream: CUstream,
     pub cfg: Config,
     core: CoreWeights,
-    pager: Pager,
+    pager: Option<Pager>,
+    pack_path: std::path::PathBuf,
+    io_threads: usize,
+    direct: bool,
     max_seq: usize,
     /// Speculative prefetch: warm layer L+1 with layer L's expert ids.
     pub prefetch_next: bool,
@@ -159,10 +162,34 @@ impl Decoder {
             stream,
             cfg,
             core,
-            pager,
+            pager: Some(pager),
+            pack_path: pack_path.to_path_buf(),
+            io_threads,
+            direct,
             max_seq,
             prefetch_next: true,
         })
+    }
+
+    /// Resize the expert cache (VRAM budgeter): drop the pager (freeing its
+    /// arenas) and build a fresh one with `slots` per layer. The cache
+    /// restarts cold; the LFU rewarms within a few tokens. Perplexity is
+    /// unaffected — paging is lossless at any size.
+    pub fn resize_cache(&mut self, slots: u32) -> Result<()> {
+        self.cuda.sync()?;
+        self.pending_release.clear(); // handles die with the old pager
+        self.pager = None; // free old arenas before allocating new ones
+        self.pager = Some(Pager::new(
+            Arc::clone(&self.cuda),
+            &self.pack_path,
+            PagerConfig {
+                slots_per_layer: slots,
+                io_threads: self.io_threads,
+                decay_interval: 64.max(slots * 4),
+                direct: self.direct,
+            },
+        )?);
+        Ok(())
     }
 
     /// Run one token at `pos`; returns the argmax over the vocab (greedy).
@@ -223,14 +250,14 @@ impl Decoder {
 
             // Paged expert FFNs — one batched launch per projection stage.
             let ids: Vec<u16> = picks.iter().map(|p| p.0).collect();
-            let handles = self.pager.request(l as u16, &ids)?;
+            let handles = self.pager.as_ref().unwrap().request(l as u16, &ids)?;
             if self.prefetch_next && l + 1 < c.layers {
                 // Cross-layer id reuse is a heuristic; prefetch is
                 // best-effort and never blocks.
-                self.pager.prefetch((l + 1) as u16, &ids);
+                self.pager.as_ref().unwrap().prefetch((l + 1) as u16, &ids);
             }
             for handle in &handles {
-                self.pager.wait_stream(handle, st)?;
+                self.pager.as_ref().unwrap().wait_stream(handle, st)?;
             }
             let e = handles.len() as i32;
             let ptrs: Vec<u8> =
@@ -272,7 +299,7 @@ impl Decoder {
     }
 
     pub fn pager_metrics(&self) -> llmpager_cuda::pager::Metrics {
-        self.pager.metrics()
+        self.pager.as_ref().unwrap().metrics()
     }
 
     /// The full logits of the last `step(_, _, true)` call (f32, vocab-sized).
@@ -292,7 +319,7 @@ impl Decoder {
             if self.cuda.event_done(self.release_events[*ev_idx])? {
                 let (_, done) = self.pending_release.pop_front().unwrap();
                 for h in done {
-                    self.pager.release(h);
+                    self.pager.as_ref().unwrap().release(h);
                 }
             } else {
                 break;
@@ -303,7 +330,7 @@ impl Decoder {
             let (ev_idx, done) = self.pending_release.pop_front().unwrap();
             self.cuda.sync_event(self.release_events[ev_idx])?;
             for h in done {
-                self.pager.release(h);
+                self.pager.as_ref().unwrap().release(h);
             }
         }
         let ev = self.next_event;
