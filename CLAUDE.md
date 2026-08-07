@@ -112,8 +112,11 @@ Version locations (must all match):
       device memory); evict-all retry on VRAM pressure
 - [x] Both 30B packs warm simultaneously on 16GB (24 slots each,
       13-14 tok/s each); verified live on ai.g8.lo:8090
-- [ ] Global VRAM budgeter: per-model expert-cache autosizing by activity
-      (busy models grow slots, idle models shrink toward zero)
+- [x] VRAM budgeter v1: solo model gets slots_solo (48), residents shrink
+      to slots (24) when another model warms; resize = pager rebuild
+      (~0.8s model load measured live; journal-verified rebalance)
+- [ ] Budgeter v2: activity-based sizing (request-rate weighted), not
+      just warm-count
 - [ ] Disk-bandwidth arbitration between concurrently faulting models
 
 ## Session Log

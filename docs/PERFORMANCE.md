@@ -181,6 +181,17 @@ tok/s) because the full lm_head runs every token and its 4x smaller
 matrix dominates; in normal decode the trade reverses. Same weights,
 different workload, opposite conclusion — measure the workload you ship.
 
+### 13. Multi-model + VRAM budgeter (M5)
+
+Two 30B-A3B models (36.9GB of weights combined) serve simultaneously from
+16GB of VRAM, routed by the OpenAI `model:` field. The budgeter divides
+the expert-cache budget by warm count: a solo model runs 48 slots
+(~33 tok/s class), and when a second model warms, residents shrink to
+24/24 (~14 tok/s each). Cache resize is a pager rebuild — measured 0.8s
+to load a whole 18.5GB model into serving rotation, because only the
+3.1GB core actually moves (experts page in on demand). Perplexity
+invariance (technique 12) is what makes resizing free of quality risk.
+
 ### Fixed along the way
 
 - **VRAM allocation granularity**: 3,072 individual ~2.5MB slot buffers

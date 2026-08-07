@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.9.0] — 2026-08-07
+
+M5 budgeter: warm-count-driven expert-cache sizing. Solo models run the
+big cache; loading a second model shrinks residents automatically.
+Model load into serving rotation measured at 0.8s.
+
+### Added
+- `Decoder::resize_cache` — rebuild the pager at a new slot count
+- Registry rebalancing on warm-set changes; `slots_solo` config field;
+  `/v1/models` reports live per-model slot allocation
+
 ## [v0.8.0] — 2026-08-07
 
 Perplexity validation: the pipeline is numerically healthy and paging is
