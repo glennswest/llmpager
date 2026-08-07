@@ -82,7 +82,8 @@ Version locations (must all match):
       expert-cache hit (numbers in docs/BENCHMARKS.md)
 - [x] Qwen3-Coder-30B-A3B pack converted (20s) and decoding idiomatic
       Rust at 18.6 tok/s cold / 77.6% hit — second model, same engine
-- [ ] Perplexity/logits sanity check vs reference implementation
+- [x] Perplexity validation (`--ppl`): 8.62 on English text; identical
+      across cache sizes (paging lossless); q4-core +4.5% PPL quantified
 
 ### M3 — Performance (in progress)
 - [x] Vectorized GEMV kernels (16B loads): q4g64 35→122 GB/s, bf16 no

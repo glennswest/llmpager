@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.8.0] — 2026-08-07
+
+Perplexity validation: the pipeline is numerically healthy and paging is
+provably lossless.
+
+### Added
+- `llmpager-run --ppl=FILE` — teacher-forced perplexity. Measured:
+  PPL 8.62 on English text, bit-identical across cache sizes (24 vs 48
+  slots), q4-core quality cost quantified at +4.5% PPL
+- `Decoder::last_logits()` accessor
+
 ## [v0.7.0] — 2026-08-07
 
 M5: multi-model serving. Two 30B MoE models warm simultaneously on one

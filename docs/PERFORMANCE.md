@@ -163,6 +163,24 @@ For Kimi-class packs (550GB ≫ RAM) this becomes the explicit pinned
 partial RAM tier in the M5 design; for anything that fits in RAM, the
 page cache already does the job with zero code.
 
+### 12. Perplexity validation — paging is provably lossless
+
+Teacher-forced NLL over a 137-token English paragraph (`--ppl`):
+
+| Config | Perplexity |
+|---|---|
+| 48 slots, bf16 core | **8.6199** |
+| 24 slots, bf16 core | **8.6199** (identical to 4 decimals) |
+| 48 slots, q4 core | 9.0038 (+4.5%) |
+
+The cache-size invariance is the architecture's correctness proof: the
+expert cache changes *when* weights are fetched, never *what* they are.
+The q4-core row puts a number on the earlier rejection (+4.5% PPL) — and
+adds a nuance: in teacher-forced mode q4-core is *faster* (37.5 vs 33.6
+tok/s) because the full lm_head runs every token and its 4x smaller
+matrix dominates; in normal decode the trade reverses. Same weights,
+different workload, opposite conclusion — measure the workload you ship.
+
 ### Fixed along the way
 
 - **VRAM allocation granularity**: 3,072 individual ~2.5MB slot buffers
