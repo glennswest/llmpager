@@ -364,6 +364,11 @@ fn top_k_softmax(logits: &[f32], k: usize, renorm: bool) -> Vec<(u16, f32)> {
     probs
 }
 
+// Safety: the raw CUDA handles are usable from any thread with the context
+// current (bind_thread / primary context); Decoder is always used behind a
+// Mutex by the server, one thread at a time.
+unsafe impl Send for Decoder {}
+
 impl Drop for Decoder {
     fn drop(&mut self) {
         // Model unloading (M5): return every device allocation. The pager
