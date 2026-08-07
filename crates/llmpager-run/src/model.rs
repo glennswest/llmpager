@@ -49,22 +49,32 @@ impl Config {
     }
 }
 
+/// A core matrix on the device: bf16 verbatim from the checkpoint, or
+/// re-quantized to q4g64 at load time (~4x less bandwidth per GEMV).
+#[derive(Clone, Copy)]
+pub struct Mat {
+    pub dev: CUdeviceptr,
+    pub rows: i32,
+    pub cols: i32,
+    pub q4: bool,
+}
+
 pub struct LayerWeights {
     pub input_ln: CUdeviceptr,   // f32 [hidden]
-    pub q: CUdeviceptr,          // bf16 [heads*hd, hidden]
-    pub k: CUdeviceptr,          // bf16 [kv*hd, hidden]
-    pub v: CUdeviceptr,          // bf16 [kv*hd, hidden]
-    pub o: CUdeviceptr,          // bf16 [hidden, heads*hd]
+    pub q: Mat,                  // [heads*hd, hidden]
+    pub k: Mat,                  // [kv*hd, hidden]
+    pub v: Mat,                  // [kv*hd, hidden]
+    pub o: Mat,                  // [hidden, heads*hd]
     pub q_norm: CUdeviceptr,     // f32 [hd]
     pub k_norm: CUdeviceptr,     // f32 [hd]
     pub post_ln: CUdeviceptr,    // f32 [hidden]
-    pub router: CUdeviceptr,     // bf16 [experts, hidden]
+    pub router: Mat,             // [experts, hidden]
 }
 
 pub struct CoreWeights {
-    pub embed: CUdeviceptr,      // bf16 [vocab, hidden]
+    pub embed: CUdeviceptr,      // bf16 [vocab, hidden] (row gather only)
     pub final_norm: CUdeviceptr, // f32 [hidden]
-    pub lm_head: CUdeviceptr,    // bf16 [vocab, hidden]
+    pub lm_head: Mat,            // [vocab, hidden]
     pub layers: Vec<LayerWeights>,
 }
 
@@ -73,7 +83,13 @@ fn f32_bytes(v: &[f32]) -> &[u8] {
 }
 
 impl CoreWeights {
-    pub fn load(cuda: &Cuda, core_path: &Path, cfg: &Config, stream: CUstream) -> Result<Self> {
+    pub fn load(
+        cuda: &Cuda,
+        core_path: &Path,
+        cfg: &Config,
+        core_q4: bool,
+        stream: CUstream,
+    ) -> Result<Self> {
         let st = SafeTensors::open(core_path)?;
 
         let up_bf16 = |name: &str, want_elems: usize| -> Result<CUdeviceptr> {
@@ -88,6 +104,30 @@ impl CoreWeights {
             cuda.htod_async(d, &raw, stream)?;
             cuda.sync_stream(stream)?; // raw dropped at return; copy must be done
             Ok(d)
+        };
+
+        // A GEMV matrix: q4-quantize on the host at load time when enabled
+        // and the shape allows it (cols % 64), else upload bf16 verbatim.
+        let up_mat = |name: &str, rows: usize, cols: usize| -> Result<Mat> {
+            if core_q4 && cols % 64 == 0 {
+                let (vals, shape) = st.f32(name)?;
+                if shape != vec![rows, cols] {
+                    bail!("{name}: shape {shape:?}, expected [{rows}, {cols}]");
+                }
+                let mut blob = vec![0u8; llmpager_core::quant::q4g64_bytes(rows, cols)];
+                llmpager_core::quant::q4g64_quantize(&vals, rows, cols, &mut blob)?;
+                let d = cuda.alloc_device(blob.len())?;
+                cuda.htod_async(d, &blob, stream)?;
+                cuda.sync_stream(stream)?;
+                Ok(Mat { dev: d, rows: rows as i32, cols: cols as i32, q4: true })
+            } else {
+                Ok(Mat {
+                    dev: up_bf16(name, rows * cols)?,
+                    rows: rows as i32,
+                    cols: cols as i32,
+                    q4: false,
+                })
+            }
         };
         let up_norm = |name: &str, want_elems: usize| -> Result<CUdeviceptr> {
             let (vals, _) = st.f32(name)?;
@@ -107,22 +147,23 @@ impl CoreWeights {
             let p = format!("model.layers.{l}");
             layers.push(LayerWeights {
                 input_ln: up_norm(&format!("{p}.input_layernorm.weight"), cfg.hidden)?,
-                q: up_bf16(&format!("{p}.self_attn.q_proj.weight"), qkv * cfg.hidden)?,
-                k: up_bf16(&format!("{p}.self_attn.k_proj.weight"), kv * cfg.hidden)?,
-                v: up_bf16(&format!("{p}.self_attn.v_proj.weight"), kv * cfg.hidden)?,
-                o: up_bf16(&format!("{p}.self_attn.o_proj.weight"), cfg.hidden * qkv)?,
+                q: up_mat(&format!("{p}.self_attn.q_proj.weight"), qkv, cfg.hidden)?,
+                k: up_mat(&format!("{p}.self_attn.k_proj.weight"), kv, cfg.hidden)?,
+                v: up_mat(&format!("{p}.self_attn.v_proj.weight"), kv, cfg.hidden)?,
+                o: up_mat(&format!("{p}.self_attn.o_proj.weight"), cfg.hidden, qkv)?,
                 q_norm: up_norm(&format!("{p}.self_attn.q_norm.weight"), cfg.head_dim)?,
                 k_norm: up_norm(&format!("{p}.self_attn.k_norm.weight"), cfg.head_dim)?,
                 post_ln: up_norm(&format!("{p}.post_attention_layernorm.weight"), cfg.hidden)?,
-                router: up_bf16(&format!("{p}.mlp.gate.weight"), cfg.experts * cfg.hidden)?,
+                router: up_mat(&format!("{p}.mlp.gate.weight"), cfg.experts, cfg.hidden)?,
             });
         }
 
         let embed = up_bf16("model.embed_tokens.weight", cfg.vocab * cfg.hidden)?;
         let lm_head = if st.names().any(|n| n == "lm_head.weight") {
-            up_bf16("lm_head.weight", cfg.vocab * cfg.hidden)?
+            up_mat("lm_head.weight", cfg.vocab, cfg.hidden)?
         } else {
-            embed // tied embeddings
+            // Tied embeddings: reuse the bf16 table as the output projection.
+            Mat { dev: embed, rows: cfg.vocab as i32, cols: cfg.hidden as i32, q4: false }
         };
         Ok(Self {
             embed,

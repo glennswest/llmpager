@@ -20,7 +20,23 @@ use llmpager_cuda::driver::{CUdeviceptr, CUstream, Cuda};
 use llmpager_cuda::kernels::Kernels;
 use llmpager_cuda::pager::{Pager, PagerConfig};
 
-use crate::model::{Config, CoreWeights};
+use crate::model::{Config, CoreWeights, Mat};
+
+/// GEMV through whichever encoding the matrix carries.
+fn mat_gemv(
+    ke: &Kernels,
+    cu: &Cuda,
+    m: &Mat,
+    x: CUdeviceptr,
+    y: CUdeviceptr,
+    st: CUstream,
+) -> Result<()> {
+    if m.q4 {
+        ke.q4g64_gemv(cu, m.dev, x, y, m.rows, m.cols, st)
+    } else {
+        ke.bf16_gemv(cu, m.dev, x, y, m.rows, m.cols, st)
+    }
+}
 
 pub struct Decoder {
     cuda: Arc<Cuda>,
@@ -68,6 +84,7 @@ impl Decoder {
         slots: u32,
         io_threads: usize,
         max_seq: usize,
+        core_q4: bool,
     ) -> Result<Self> {
         let meta = PackReader::open(pack_path)?.meta().clone();
         let cfg = Config::from_json(&meta.config)?;
@@ -82,7 +99,7 @@ impl Decoder {
             "loading core ({} layers, hidden {}, {} experts top-{}) ...",
             cfg.layers, cfg.hidden, cfg.experts, cfg.top_k
         );
-        let core = CoreWeights::load(&cuda, core_path, &cfg, stream)?;
+        let core = CoreWeights::load(&cuda, core_path, &cfg, core_q4, stream)?;
         let pager = Pager::new(
             Arc::clone(&cuda),
             pack_path,
@@ -158,9 +175,9 @@ impl Decoder {
 
             // Attention block.
             ke.rmsnorm(cu, self.h, w.input_ln, self.h_norm, 1, hid, c.rms_eps, st)?;
-            ke.bf16_gemv(cu, w.q, self.h_norm, self.q, qkv, hid, st)?;
-            ke.bf16_gemv(cu, w.k, self.h_norm, self.k, kvd, hid, st)?;
-            ke.bf16_gemv(cu, w.v, self.h_norm, self.v, kvd, hid, st)?;
+            mat_gemv(ke, cu, &w.q, self.h_norm, self.q, st)?;
+            mat_gemv(ke, cu, &w.k, self.h_norm, self.k, st)?;
+            mat_gemv(ke, cu, &w.v, self.h_norm, self.v, st)?;
             ke.rmsnorm(cu, self.q, w.q_norm, self.q, c.heads as i32, c.head_dim as i32, c.rms_eps, st)?;
             ke.rmsnorm(cu, self.k, w.k_norm, self.k, c.kv_heads as i32, c.head_dim as i32, c.rms_eps, st)?;
             ke.rope(cu, self.q, c.heads as i32, c.head_dim as i32, pos as i32, c.rope_theta, st)?;
@@ -175,12 +192,12 @@ impl Decoder {
                 (pos + 1) as i32, self.max_seq as i32,
                 1.0 / (c.head_dim as f32).sqrt(), st,
             )?;
-            ke.bf16_gemv(cu, w.o, self.attn_out, self.proj_out, hid, qkv, st)?;
+            mat_gemv(ke, cu, &w.o, self.attn_out, self.proj_out, st)?;
             ke.add(cu, self.h, self.proj_out, hid, st)?;
 
             // Router (host-side top-k over a tiny logit vector).
             ke.rmsnorm(cu, self.h, w.post_ln, self.h_norm, 1, hid, c.rms_eps, st)?;
-            ke.bf16_gemv(cu, w.router, self.h_norm, self.router_logits, c.experts as i32, hid, st)?;
+            mat_gemv(ke, cu, &w.router, self.h_norm, self.router_logits, st)?;
             cu.dtoh_async(&mut self.router_host, self.router_logits, st)?;
             cu.sync_stream(st)?;
             let picks = top_k_softmax(
@@ -211,7 +228,7 @@ impl Decoder {
         }
 
         ke.rmsnorm(cu, self.h, self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
-        ke.bf16_gemv(cu, self.core.lm_head, self.h_norm, self.logits, c.vocab as i32, hid, st)?;
+        mat_gemv(ke, cu, &self.core.lm_head, self.h_norm, self.logits, st)?;
         cu.dtoh_async(&mut self.logits_host, self.logits, st)?;
         cu.sync_stream(st)?;
         let logits = f32_from_le(&self.logits_host);
