@@ -55,6 +55,32 @@ CUDA toolkit install needed, just the GPU driver. `llmpager-core` (pack format,
 cache) has no GPU dependency at all, so its tests run on any machine,
 including macOS.
 
+## Install (Debian / Fedora)
+
+Prebuilt x86_64 packages ship with each GitHub release — the binaries load
+`libcuda.so.1` at runtime, so one build serves both families and no CUDA
+toolkit is needed:
+
+```bash
+# Debian / Ubuntu
+sudo apt install ./llmpager_<version>_amd64.deb
+
+# Fedora / RHEL
+sudo dnf install ./llmpager-<version>-1.x86_64.rpm
+```
+
+Then convert a model, point the config at it, and start the service:
+
+```bash
+llmpager-convert --model-dir=<hf-checkpoint> \
+  --out-pack=/var/lib/llmpager/m.llmpk \
+  --out-core=/var/lib/llmpager/m.core.safetensors
+sudo edit /etc/llmpager/serve.json     # name, pack, core, tokenizer paths
+sudo systemctl enable --now llmpager   # OpenAI-compatible API on :8090
+```
+
+Packages are reproducible from source: `deploy/packaging/build-packages.sh`.
+
 ## Development
 
 ```bash

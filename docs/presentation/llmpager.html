@@ -127,8 +127,9 @@
   .checklist li::marker { content: "✔  "; color: var(--rh-red); }
   .xlist li::marker { content: "✘  "; color: var(--rh-red); }
   @media print {
-    body { overflow: visible; }
-    section.slide { display: flex !important; position: relative; height: 100vh; page-break-after: always; }
+    @page { size: 338.7mm 190.5mm; margin: 0; }
+    html, body { overflow: visible; background: var(--rh-white); }
+    section.slide { display: flex !important; position: relative; height: 100vh; page-break-after: always; break-inside: avoid; }
   }
 </style>
 </head>
@@ -257,7 +258,7 @@
           <tr><td>GPU</td><td>RTX 5060 Ti 16 GB (Blackwell), vfio passthrough</td></tr>
           <tr><td>CPU / RAM</td><td>12 vCPU · 64 GB</td></tr>
           <tr><td>Storage</td><td>200 GB root + 800 GB /data (NVMe-backed)</td></tr>
-          <tr><td>Stack</td><td>Debian 13 · driver 610.43 · CUDA 13.3 · Rust 1.96</td></tr>
+          <tr><td>Stack</td><td>Debian 13 · driver 610.43 · CUDA 13.3 · Rust 1.96 (deb/rpm packages for Debian &amp; Fedora)</td></tr>
         </table>
         <p class="sub">Day-zero war story: the new motherboard's ACPI D3cold support
         wedged the GPU under vfio — <code>vfio_pci.disable_idle_d3=1</code>
@@ -294,7 +295,7 @@
     </table>
     <ul>
       <li><b>No CUDA toolkit at runtime</b> — the driver API is loaded from <code>libcuda.so.1</code>; kernels compile to PTX at build time and the driver JITs them onto Blackwell.</li>
-      <li>Apache-2.0 · <b>github.com/glennswest/llmpager</b> · 10 tagged releases in ~5 hours.</li>
+      <li>Apache-2.0 · <b>github.com/glennswest/llmpager</b> · tagged releases with <b>.deb / .rpm packages</b> — <code>apt install</code> on Debian, <code>dnf install</code> on Fedora, then edit one config file and <code>systemctl start llmpager</code>.</li>
     </ul>
     <div class="plain"><b>In plain terms:</b> five building blocks — a file format, a librarian that moves weights, a converter that repackages downloaded models, a runner that generates text, and a web server that answers requests like any AI API.</div>
   </div>

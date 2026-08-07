@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.11.0] — 2026-08-07
+
+### Added
+- Packaging: `.deb` (Debian/Ubuntu) and `.rpm` (Fedora/RHEL) built by
+  `deploy/packaging/build-packages.sh` — /usr/bin binaries, systemd unit,
+  `/etc/llmpager/serve.json` conffile, docs; glibc is the only hard
+  dependency (libcuda loads at runtime). Attached to GitHub releases.
+- Presentation: plain-language vocabulary slide + "in plain terms"
+  callouts; PDF export (docs/presentation/llmpager.pdf)
+- README: Debian/Fedora install instructions
+
 ## [v0.10.0] — 2026-08-07
 
 ### Added
