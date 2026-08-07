@@ -124,6 +124,33 @@ Remaining per-token costs (~30ms): 48 router dtoh round-trips, expert
 misses (~10% at 48 slots), core bf16 streaming (~4.3GB/token — quantizing
 the core is the biggest open win), per-expert launch overhead.
 
+## Real-model cache sweep — 2026-08-07, ai.g8.lo (v0.4.0, O_DIRECT)
+
+Qwen3-30B-A3B, 64 generated tokens. "capital" = warm routing (repetitive),
+"haiku" = cold routing (diverse). Decode tok/s (hit rate):
+
+| Slots/layer | VRAM cache | capital | haiku |
+|---|---|---|---|
+| 24 | 2.9 GB | 14.8 (71.8%) | 11.2 (57.9%) |
+| 32 | 3.9 GB | 21.0 (81.4%) | 13.2 (66.6%) |
+| 48 | 5.8 GB | 33.3 (89.4%) | 20.4 (78.9%) |
+| 64 | 7.7 GB | 34.6 (90.4%) | 25.5 (84.6%) |
+
+Diminishing returns above 48 slots on warm prompts, but cold prompts keep
+gaining — more slots mostly help the miss-heavy workloads. The stronger
+fix for misses is making them cheaper, not fewer: see the RAM tier below.
+
+## RAM tier — 2026-08-07 (v0.5.0, `--direct=0`)
+
+Pack (15.4GB) fully page-cache resident in 64GB host RAM; misses become
+~25 GB/s memory copies instead of 4 GB/s disk reads. 48 slots:
+
+| Prompt | O_DIRECT | RAM tier warm |
+|---|---|---|
+| capital | 33.3 tok/s | **37.6 tok/s** |
+| haiku | 20.4 tok/s | **32.2 tok/s** |
+| prefill | 7-9 tok/s | 12-17 tok/s |
+
 ### Read-through for the design
 
 - The miss path costs ~0.7-1ms per 3MB expert (read) + ~0.12ms (H2D) —
