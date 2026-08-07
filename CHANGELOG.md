@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.3.0] — 2026-08-07
+
+Decode 19.9 → 33.1 tok/s (+66%) on Qwen3-30B-A3B.
+
+### Changed
+- Vectorized GEMV kernels: q4g64 uses uint nibble-words + float4 x loads
+  (35 → 122 GB/s); bf16 uses uint4 loads with a scalar tail (no longer
+  the bandwidth limiter)
+- Expert handles released via a small CUDA-event ring instead of a
+  per-layer stream sync — the GPU pipeline stays deep across layers
+- `gemv` bench also measures bf16 GEMV throughput
+
 ## [v0.2.0] — 2026-08-07
 
 First working release: a real MoE model (Qwen3-30B-A3B, 18.5GB of weights)
