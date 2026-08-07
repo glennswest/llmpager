@@ -44,3 +44,11 @@ temp/
 
 # Rust build artifacts
 target/
+
+# Presentation video build artifacts
+docs/presentation/frames/
+docs/presentation/tts/
+docs/presentation/segs/
+docs/presentation/concat.txt
+docs/presentation/*.mp4
+docs/presentation/voice/

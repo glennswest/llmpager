@@ -1,0 +1,1 @@
+If you want to try it, it's one curl command against the server, or one package install on Debian or Fedora — the repository, the full performance journal, and the design docs are all public. I'll leave you with my favorite detail of the whole project: an eighteen-gigabyte model, answering questions about memory paging, while its own experts are being paged. Thanks for watching.
