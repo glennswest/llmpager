@@ -159,3 +159,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 
 ### 2026-08-07
 - **docs:** Red Hat-styled HTML presentation (docs/presentation/llmpager.html) — overview, source, results, lessons learned
+- **fix:** timeline corrected — ai.g8.lo was on UTC; the whole project ran in one ~5-hour session (first tokens at hour 3); VM timezone set to America/Chicago

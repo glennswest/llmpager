@@ -1,7 +1,7 @@
 # Performance Journey
 
 The running story of how llmpager got faster, one technique at a time.
-Every number was measured on the same hardware in one ~10-hour session; each section explains the
+Every number was measured on the same hardware in one ~5-hour session; each section explains the
 technique, why it works, and what it bought. BENCHMARKS.md holds the raw
 result tables; this file is the narrative.
 
@@ -25,14 +25,14 @@ experts per layer from NVMe through a VRAM LFU cache.
 |---|---|---|---|
 | 08-06 | M0: synchronous paged fetch, 48 slots | paging ceiling (no compute) | 104 tok/s |
 | 08-06 | M1: async pager + 1-layer prefetch | paging ceiling (no compute) | **113 tok/s** |
-| 08-07 | M2: first real decode (scalar kernels) | real decode | 19.9 tok/s |
-| 08-07 | M3: vectorized GEMV kernels | real decode | 31.1 tok/s |
-| 08-07 | M3: event-based deferred handle release | real decode | 33.1 tok/s |
-| 08-07 | M3: batched MoE launches | real decode | 34.8 tok/s |
-| 08-07 | (rejected) core q4 | real decode | 25.9 tok/s ✗ |
-| 08-07 | (rejected) cross-layer prefetch | real decode (cold prompt) | 10.8 vs 18.5 tok/s ✗ |
-| 08-07 | M3: RAM tier (page cache, `--direct=0`) | real decode | 37.6 tok/s (32.2 on cold prompts) |
-| 08-07 | M3: fp16 magic-number nibble unpack | real decode | **41.0 tok/s** |
+| 08-06 | M2: first real decode (scalar kernels) | real decode | 19.9 tok/s |
+| 08-06 | M3: vectorized GEMV kernels | real decode | 31.1 tok/s |
+| 08-06 | M3: event-based deferred handle release | real decode | 33.1 tok/s |
+| 08-06 | M3: batched MoE launches | real decode | 34.8 tok/s |
+| 08-06 | (rejected) core q4 | real decode | 25.9 tok/s ✗ |
+| 08-06 | (rejected) cross-layer prefetch | real decode (cold prompt) | 10.8 vs 18.5 tok/s ✗ |
+| 08-06 | M3: RAM tier (page cache, `--direct=0`) | real decode | 37.6 tok/s (32.2 on cold prompts) |
+| 08-06 | M3: fp16 magic-number nibble unpack | real decode | **41.0 tok/s** |
 
 The gap between 33 tok/s real decode and the 113 tok/s paging ceiling is
 the remaining M3 headroom — the pager can already feed experts 3× faster
@@ -213,7 +213,7 @@ the rejection survives its own fix. Total arc: 19.9 → 41.0 (+106%).
 
 Wall-clock milestones mined from the session transcript (2026-08-06,
 times local). The project went from a wedged GPU and an empty repo to a
-released paging engine with real tokens in about eight hours:
+released paging engine with real tokens in under three hours:
 
 | Time | Event |
 |---|---|
@@ -228,7 +228,7 @@ released paging engine with real tokens in about eight hours:
 | 17:45 | First custom CUDA kernel verified on Blackwell (q4g64 GEMV, rel err 5.2e-6, 35 GB/s scalar) |
 | 18:02 | Full decode kernel set verified (7 kernels, worst rel err 1.9e-6) |
 | 19:00 | Qwen3-30B-A3B converted in 21s; **first real tokens: "…Paris."** at 19.9 tok/s |
-| +next session | Vectorized GEMVs → 31.1 tok/s; event-ring release → 33.1 tok/s; v0.2.0 and v0.3.0 tagged |
+| later that evening | Vectorized GEMVs → 31.1 tok/s; event-ring release → 33.1 tok/s; v0.2.0 and v0.3.0 tagged |
 
 Presentation-worthy details preserved in the transcript:
 - The GPU "pending transaction" FLR timeouts that *looked* like a wedged

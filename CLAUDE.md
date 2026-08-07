@@ -121,14 +121,14 @@ Version locations (must all match):
 
 ## Session Log
 
-- 2026-08-07 (later): M3 continued — RAM tier (`--direct=0`, biggest
+- 2026-08-06 (evening): M3 continued — RAM tier (`--direct=0`, biggest
   single win: cold prompts 20→32 tok/s, peak 37.6), batched MoE, prefill
   lm_head skip; core-q4 and cross-layer prefetch measured and rejected
   (PERFORMANCE.md). M4 shipped: llmpager-serve + systemd on ai.g8.lo:8090,
   verified over the network. Coder pack converted — two models ready.
   Releases: v0.4.0, v0.5.0, v0.6.0. Next: M5 multi-model (registry,
   budgeter), perplexity check, q4-kernel ALU work.
-- 2026-08-07: **First real tokens.** Qwen3-30B-A3B decodes coherently at
+- 2026-08-06 (19:00): **First real tokens.** Qwen3-30B-A3B decodes coherently at
   ~19 tok/s greedy (83% cache hit) with experts paged from NVMe on the
   16GB card — M2's core goal. Fixed VRAM allocation-granularity waste
   (per-layer slot arenas). Released v0.2.0. Remaining M2: coder pack
