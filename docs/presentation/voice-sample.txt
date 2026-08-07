@@ -1,0 +1,1 @@
+Hi, I'm Glenn West. This is llmpager, a project about running large language models on small graphics cards. The cache holds forty-eight experts per layer, the disk moves four gigabytes per second, and the whole thing was measured, not guessed. Paris, London, Berlin — thirty billion parameters, sixteen gigabytes of memory, five hours of work.
