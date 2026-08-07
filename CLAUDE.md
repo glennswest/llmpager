@@ -99,8 +99,11 @@ Version locations (must all match):
 - [ ] tokens/sec + hit-rate benchmarks vs cache size
 
 ### M4 — Serving
-- [ ] OpenAI-compatible HTTP endpoint
-- [ ] Deployment unit (systemd) on ai.g8.lo
+- [x] OpenAI-compatible HTTP endpoint (`llmpager-serve`: /v1/models,
+      /v1/completions, /v1/chat/completions with Qwen3 ChatML template,
+      EOS stopping, usage + tok/s in responses)
+- [x] Deployment unit: systemd `llmpager.service` on ai.g8.lo, port 8090,
+      base model + RAM tier; verified over the network from the Mac
 
 ### M5 — Multi-model
 - [ ] Global VRAM budgeter: per-model expert-cache autosizing by activity

@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.6.0] — 2026-08-07
+
+M4: serving. llmpager is now a network service on ai.g8.lo.
+
+### Added
+- `llmpager-serve`: OpenAI-compatible HTTP server — GET /v1/models,
+  POST /v1/completions, POST /v1/chat/completions (Qwen3 ChatML
+  template); greedy decode, serial requests, usage + tok/s in responses
+- EOS stopping from model config (`eos_token_id`), used by CLI and server
+- `deploy/llmpager.service` — systemd unit, deployed and verified
+  (chat completion over the network at ~20 tok/s)
+- `llmpager-run` split into lib + bin so the server reuses the Decoder
+
 ## [v0.5.0] — 2026-08-07
 
 The RAM tier: `--direct=0` serves the pack from the OS page cache when it
