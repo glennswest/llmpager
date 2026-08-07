@@ -77,3 +77,5 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **docs:** PERFORMANCE.md appendix — one-day timeline and details mined from the session transcript
 - **perf:** Core q4 experiment measured and rejected (25.9 vs 33.1 tok/s; greedy drift) — kept behind --core-dtype=q4; findings in PERFORMANCE.md
 - **perf:** Batched MoE launches (33.1→34.8 tok/s); prefill skips lm_head for non-final tokens; cross-layer prefetch measured and rejected (cache pollution) — details in PERFORMANCE.md
+
+- **feat:** Qwen3-Coder-30B-A3B converted and verified — second model running through the same engine (18.6 tok/s cold-cache)

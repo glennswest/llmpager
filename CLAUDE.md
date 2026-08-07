@@ -80,7 +80,8 @@ Version locations (must all match):
 - [x] Real tokens on ai.g8.lo: Qwen3-30B-A3B converted (21s; 15.4GB pack
       + 3.1GB core) and decoding coherently at ~19 tok/s greedy, 83%
       expert-cache hit (numbers in docs/BENCHMARKS.md)
-- [ ] Qwen3-Coder-30B-A3B pack (download in progress, watcher armed)
+- [x] Qwen3-Coder-30B-A3B pack converted (20s) and decoding idiomatic
+      Rust at 18.6 tok/s cold / 77.6% hit — second model, same engine
 - [ ] Perplexity/logits sanity check vs reference implementation
 
 ### M3 — Performance (in progress)
