@@ -1,5 +1,25 @@
 # Changelog
 
+## [v0.12.0] — 2026-08-08
+
+### Added
+- Union prefill: chunked prompt processing fetches each layer's expert
+  union once per chunk (measured on Qwen3-30B, 1215-token prompt,
+  O_DIRECT under disk contention: prefill 71.9s -> 47.2s, bytes
+  streamed 166 -> 108GB); --chunk=1 restores per-token for A/B
+- Sampling: temperature / top-p / top-k / repetition penalty / seed in
+  CLI and server (OpenAI request fields); greedy remains default
+- Kimi K2.6 support end-to-end: q4g32 repack converter, MLA absorbed
+  decode engine (KimiDecoder), AnyDecoder auto-dispatch, Kimi chat
+  template in serve; synthetic checkpoint pipeline verified on GPU
+  (deterministic, cache-size invariant)
+- Infra: ai.g8.lo RAM 64->128GB, /data 800G->2TB, virtio iothreads
+  (25MB-blob reads 3.6 -> 6.94 GB/s)
+
+### Fixed
+- Union prefill wave release deadlock (eager release per wave)
+- build.rs placeholder PTX when nvcc absent (macOS development)
+
 ## [v0.11.0] — 2026-08-07
 
 ### Added
