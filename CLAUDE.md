@@ -165,6 +165,25 @@ weight_scale), 1.1TB — repack, don't requantize.
 - [ ] Union prefill (chunked, per-layer expert union) — required for
       usable prompt processing at Kimi scale
 
+### M7 — Throughput & serving quality (in progress)
+Approved 2026-08-08: items 1-5, in order.
+- [ ] 1. Union prefill: `step_chunk(tokens, start_pos)` in both decoders —
+      per layer: attention token-by-token (causal), router for the whole
+      chunk, then experts fetched as the chunk's per-layer union in waves
+      (wave ≤ slots/2 to avoid pin deadlock; moe_reduce accumulates
+      across waves). CLI/serve prefill switches to chunks (default 64).
+      Measure Qwen prefill before/after; Kimi needs this to be usable.
+- [ ] 2. Sampling: temperature / top-p / top-k / repetition penalty in
+      the serve layer + CLI (--temp etc.); greedy stays default for
+      benchmarks/ppl.
+- [ ] 3. Kimi in llmpager-serve: AnyDecoder in the registry, Kimi chat
+      template (kimi_k25 ChatML variant from tokenizer_config), synthetic-
+      pack test; ready for the real pack when the watcher converts it.
+- [ ] 4. Batched decode: N sequences share expert fetches per layer
+      (same wave machinery as union prefill applied at decode time).
+- [ ] 5. Smaller: f16 KV (+ longer max_seq), GPU router top-k (drop
+      per-layer host syncs), expert-usage profiling + RAM pre-warm.
+
 ## Session Log
 
 - 2026-08-06 (evening): M3 continued — RAM tier (`--direct=0`, biggest
