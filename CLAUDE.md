@@ -135,15 +135,17 @@ weight_scale), 1.1TB — repack, don't requantize.
 - [x] Kernels: q4 GEMV + batch generalized to group param; verified on
       GPU (g32 @ 2048x7168: 1.4e-5, 192.5 GB/s; g64 no regression);
       decoder reads group from pack dtype (q4g32-gud)
-- [ ] Converter: kimi_k25 arch — tensor names confirmed from index:
-      `language_model.model.layers.L.mlp.experts.E.{gate,up,down}_proj.
-      {weight_packed,weight_scale,weight_shape}` (int4 g32, 0..383);
-      shared_experts + all self_attn (q_a/q_b/kv_a_with_mqa/kv_b/o) +
-      dense layer-0 mlp are plain bf16 `.weight` — QAT covers experts
-      only. Roots mm_projector/vision_tower skipped. Attention bf16 is
-      13.4GB → requantize attention/shared/dense to q4g64 at convert
-      (existing core-q4 path). Packing layout (int32 words vs bytes) to
-      verify from an expert shard header when one lands.
+- [x] Converter: kimi_k25 auto-detected; compressed-tensors int4 g32
+      repacked bit-exactly (I32 [rows, cols/8], value k at bits 4k;
+      scales bf16→f16); core = all non-expert language_model tensors,
+      prefix stripped; vision dropped; moe_layer_offset=1 for the dense
+      first layer. Round-trip unit test vs reference dequant green.
+      Attention/shared/dense stay bf16 in the core file — the runtime
+      requantizes to q4g64 at load (bf16 core is 13.4GB, over VRAM).
+- [ ] Run converter on the real checkpoint when download completes
+      (arm watcher: convert-one.sh pattern for moonshotai/Kimi-K2.6)
+- [x] Infra opts: VM RAM 64→128GB (host has 187GB); disk iothreads —
+      8-thread O_DIRECT at 25MB blobs now 6.94 GB/s (was 3.6)
 - [ ] Estimate check (from config): core ~7-8GB int4 in VRAM (MLA attn
       ~6.7B params + shared/dense + lm_head), embed table host-side
       (sparse row gather), MLA KV ~70KB/token → ~250 expert slots in
