@@ -35,12 +35,16 @@ struct ModelSpec {
     slots_solo: u32,
     io_threads: usize,
     direct: bool,
+    /// Managed host-RAM expert tier (GB); for packs larger than RAM.
+    ram_gb: f64,
+    max_seq: usize,
 }
 
 struct Engine {
     dec: AnyDecoder,
     tok: tokenizers::Tokenizer,
     cur_slots: u32,
+    max_seq: usize,
 }
 
 struct Registry {
@@ -106,9 +110,10 @@ impl Registry {
             let tok = tokenizers::Tokenizer::from_file(&tok_file)
                 .map_err(|e| anyhow::anyhow!("loading {}: {e}", tok_file.display()))?;
             let dec = AnyDecoder::new(
-                &spec.pack, &spec.core, slots, spec.io_threads, 4096, false, spec.direct,
+                &spec.pack, &spec.core, slots, spec.io_threads, spec.max_seq,
+                false, spec.direct, (spec.ram_gb * 1e9) as u64,
             )?;
-            Ok(Engine { dec, tok, cur_slots: slots })
+            Ok(Engine { dec, tok, cur_slots: slots, max_seq: spec.max_seq })
         };
         let engine = match load(&spec, slots) {
             Ok(e) => e,
@@ -182,7 +187,7 @@ fn generate(
             }
         }
         let pos = ids.len() + i;
-        if pos + 1 >= 4096 {
+        if pos + 1 >= engine.max_seq {
             break;
         }
         let greedy = engine.dec.step(next, pos, true)?;
@@ -302,6 +307,8 @@ fn main() -> Result<()> {
                     .unwrap_or(2 * m["slots"].as_u64().unwrap_or(32) as u32),
                 io_threads: m["io_threads"].as_u64().unwrap_or(4) as usize,
                 direct: m["direct"].as_bool().unwrap_or(false),
+                ram_gb: m["ram_gb"].as_f64().unwrap_or(0.0),
+                max_seq: m["max_seq"].as_u64().unwrap_or(4096) as usize,
             })
         })
         .collect::<Result<_>>()?;

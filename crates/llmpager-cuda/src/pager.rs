@@ -34,11 +34,121 @@ pub struct PagerConfig {
     /// pack exceeds host RAM; false lets the page cache act as a RAM tier —
     /// misses cost a memory copy instead of a disk read once warm.
     pub direct: bool,
+    /// Managed host-RAM expert tier in bytes (0 disables). For packs far
+    /// larger than RAM: frequency-aware admission/eviction at expert
+    /// granularity; a hit costs a host memcpy instead of a disk read.
+    pub ram_bytes: u64,
 }
 
 impl Default for PagerConfig {
     fn default() -> Self {
-        Self { slots_per_layer: 32, io_threads: 4, decay_interval: 256, direct: true }
+        Self {
+            slots_per_layer: 32,
+            io_threads: 4,
+            decay_interval: 256,
+            direct: true,
+            ram_bytes: 0,
+        }
+    }
+}
+
+/// Host-RAM expert tier: one anonymous NORESERVE mapping sliced into
+/// blob-span slabs; bookkeeping is a single-pool ExpertCache whose expert
+/// id folds (layer, expert) together.
+struct RamTier {
+    cache: Mutex<ExpertCache>,
+    base: *mut u8,
+    bytes: usize,
+    span: usize,
+    experts_per_layer: u32,
+    hits: AtomicU64,
+}
+
+// Safety: slab contents are only read after publish under the pin
+// discipline; the mapping itself is plain anonymous memory.
+unsafe impl Send for RamTier {}
+unsafe impl Sync for RamTier {}
+
+impl RamTier {
+    fn new(bytes: u64, span: usize, num_layers: u16, experts_per_layer: u16) -> Option<Self> {
+        let slots = (bytes as usize / span) as u32;
+        // The folded (layer, expert) key must fit the cache's u16 id space.
+        let total = num_layers as u32 * experts_per_layer as u32;
+        if slots == 0 || total > u16::MAX as u32 {
+            return None;
+        }
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                slots as usize * span,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return None;
+        }
+        Some(Self {
+            cache: Mutex::new(ExpertCache::new(1, slots, slots.max(64) * 4)),
+            base: base as *mut u8,
+            bytes: slots as usize * span,
+            span,
+            experts_per_layer: experts_per_layer as u32,
+            hits: AtomicU64::new(0),
+        })
+    }
+
+    fn key(&self, layer: u16, expert: u16) -> u16 {
+        (layer as u32 * self.experts_per_layer + expert as u32) as u16
+    }
+
+    fn slab(&self, slot: u32) -> *mut u8 {
+        unsafe { self.base.add(slot as usize * self.span) }
+    }
+
+    /// Copy the expert into `dst` on hit.
+    fn get(&self, layer: u16, expert: u16, dst: &mut [u8]) -> bool {
+        let key = self.key(layer, expert);
+        let slot = match self.cache.lock().unwrap().lookup_ready(0, key) {
+            Some(s) => s,
+            None => return false,
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.slab(slot), dst.as_mut_ptr(), self.span);
+        }
+        self.cache.lock().unwrap().release(0, slot);
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Write-allocate after a disk read; best-effort.
+    fn put(&self, layer: u16, expert: u16, src: &[u8]) {
+        let key = self.key(layer, expert);
+        let slot = {
+            let mut c = self.cache.lock().unwrap();
+            match c.acquire(0, key) {
+                Lookup::Miss { slot, .. } => slot,
+                Lookup::Hit(s) => {
+                    c.release(0, s);
+                    return;
+                }
+                Lookup::Stalled => return,
+            }
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), self.slab(slot), self.span);
+        }
+        let mut c = self.cache.lock().unwrap();
+        c.publish(0, slot);
+        c.release(0, slot);
+    }
+}
+
+impl Drop for RamTier {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.base as *mut _, self.bytes) };
     }
 }
 
@@ -86,6 +196,7 @@ struct Shared {
     fetches: AtomicU64,
     // Latency histogram buckets: <1, <2, <5, <10, <20, <50, >=50 ms.
     lat_buckets: [AtomicU64; 7],
+    ram: Option<RamTier>,
 }
 
 impl Shared {
@@ -150,6 +261,7 @@ impl Pager {
             slots_per_layer: cfg.slots_per_layer,
             span,
             bytes_fetched: AtomicU64::new(0),
+            ram: RamTier::new(cfg.ram_bytes, span, meta.num_layers, meta.experts_per_layer),
             fetches: AtomicU64::new(0),
             lat_buckets: Default::default(),
         });
@@ -275,6 +387,11 @@ impl Pager {
             misses,
             bytes_fetched: self.shared.bytes_fetched.load(Ordering::Relaxed),
             fetches: self.shared.fetches.load(Ordering::Relaxed),
+            ram_hits: self
+                .shared
+                .ram
+                .as_ref()
+                .map_or(0, |r| r.hits.load(Ordering::Relaxed)),
             latency_ms_buckets: self
                 .shared
                 .lat_buckets
@@ -319,6 +436,8 @@ pub struct Metrics {
     pub misses: u64,
     pub bytes_fetched: u64,
     pub fetches: u64,
+    /// Fetches served from the host-RAM tier (subset of `fetches`).
+    pub ram_hits: u64,
     /// Fetch wall-time histogram: <1, <2, <5, <10, <20, <50, >=50 ms.
     pub latency_ms_buckets: [u64; 7],
 }
@@ -358,7 +477,20 @@ fn worker(
         };
         let t0 = Instant::now();
         let idx = shared.idx(job.layer, job.slot);
-        let len = reader.read_blob_into(job.layer, job.expert, pin.as_mut())?;
+        let span = shared.span;
+        let ram_hit = shared
+            .ram
+            .as_ref()
+            .map_or(false, |r| r.get(job.layer, job.expert, &mut pin.as_mut()[..span]));
+        let len = if ram_hit {
+            reader.entry(job.layer, job.expert).nbytes as usize
+        } else {
+            let n = reader.read_blob_into(job.layer, job.expert, pin.as_mut())?;
+            if let Some(r) = &shared.ram {
+                r.put(job.layer, job.expert, &pin.as_ref()[..span]);
+            }
+            n
+        };
         let aligned = len.div_ceil(ALIGN as usize) * ALIGN as usize;
         cuda.htod_async(shared.dev_slots[idx], &pin.as_ref()[..aligned], stream)?;
         cuda.record_event(shared.events[idx], stream)?;

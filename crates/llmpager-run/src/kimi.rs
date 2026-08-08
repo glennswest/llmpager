@@ -365,6 +365,7 @@ pub struct KimiDecoder {
     pack_path: PathBuf,
     io_threads: usize,
     direct: bool,
+    ram_bytes: u64,
     max_seq: usize,
     /// Skip routed experts whose normalized weight falls below this
     /// (fetch-traffic saver; 0.0 disables).
@@ -436,6 +437,7 @@ impl KimiDecoder {
         io_threads: usize,
         max_seq: usize,
         direct: bool,
+        ram_bytes: u64,
     ) -> Result<Self> {
         let meta = PackReader::open(pack_path)?.meta().clone();
         let cfg = KimiConfig::from_json(&meta.config)?;
@@ -468,6 +470,7 @@ impl KimiDecoder {
                 io_threads,
                 decay_interval: 64.max(slots * 4),
                 direct,
+                ram_bytes,
             },
         )?;
 
@@ -535,6 +538,7 @@ impl KimiDecoder {
             pack_path: pack_path.to_path_buf(),
             io_threads,
             direct,
+            ram_bytes,
             max_seq,
             min_expert_weight: 0.0,
         })
@@ -552,6 +556,7 @@ impl KimiDecoder {
                 io_threads: self.io_threads,
                 decay_interval: 64.max(slots * 4),
                 direct: self.direct,
+                ram_bytes: self.ram_bytes,
             },
         )?);
         Ok(())

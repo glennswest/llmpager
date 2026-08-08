@@ -48,6 +48,7 @@ pub struct Decoder {
     pack_path: std::path::PathBuf,
     io_threads: usize,
     direct: bool,
+    ram_bytes: u64,
     max_seq: usize,
     /// Speculative prefetch: warm layer L+1 with layer L's expert ids.
     pub prefetch_next: bool,
@@ -103,6 +104,7 @@ impl Decoder {
         max_seq: usize,
         core_q4: bool,
         direct: bool,
+        ram_bytes: u64,
     ) -> Result<Self> {
         let meta = PackReader::open(pack_path)?.meta().clone();
         let cfg = Config::from_json(&meta.config)?;
@@ -128,6 +130,7 @@ impl Decoder {
                 io_threads,
                 decay_interval: 64.max(slots * 4),
                 direct,
+                ram_bytes,
             },
         )?;
 
@@ -190,6 +193,7 @@ impl Decoder {
             pack_path: pack_path.to_path_buf(),
             io_threads,
             direct,
+            ram_bytes,
             max_seq,
             prefetch_next: true,
         })
@@ -211,6 +215,7 @@ impl Decoder {
                 io_threads: self.io_threads,
                 decay_interval: 64.max(slots * 4),
                 direct: self.direct,
+                ram_bytes: self.ram_bytes,
             },
         )?);
         Ok(())

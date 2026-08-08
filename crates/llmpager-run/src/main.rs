@@ -29,6 +29,8 @@ fn main() -> Result<()> {
     // --direct=0: let the OS page cache act as a RAM tier for the pack —
     // right when the pack fits in host RAM; keep O_DIRECT for huge packs.
     let direct = arg(&args, "direct").as_deref() != Some("0");
+    // Managed host-RAM expert tier (GB); the lever for packs >> RAM.
+    let ram_gb: f64 = arg(&args, "ram-gb").and_then(|v| v.parse().ok()).unwrap_or(0.0);
 
     // Tokenizer is optional: --prompt-ids allows raw-id smoke tests.
     let tokenizer = match arg(&args, "tokenizer") {
@@ -68,6 +70,7 @@ fn main() -> Result<()> {
         max_seq,
         core_q4,
         direct,
+        (ram_gb * 1e9) as u64,
     )?;
     // Qwen cross-layer prefetch: default off (measured 18.5 -> 10.8 tok/s).
     dec.set_prefetch_next(arg(&args, "prefetch-next").as_deref() == Some("1"));

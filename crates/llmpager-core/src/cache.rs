@@ -121,6 +121,22 @@ impl ExpertCache {
         Lookup::Miss { slot, evicted }
     }
 
+    /// Hit-only lookup: pin and return the slot if the expert is resident
+    /// AND published; never inserts. Used by read-through tiers (e.g. the
+    /// host-RAM expert cache) where a miss is handled out of band.
+    pub fn lookup_ready(&mut self, layer: Layer, expert: Expert) -> Option<Slot> {
+        let lc = &mut self.layers[layer as usize];
+        let &slot = lc.map.get(&expert)?;
+        let s = &mut lc.slots[slot as usize];
+        if !s.ready {
+            return None;
+        }
+        s.freq = s.freq.saturating_add(1);
+        s.pins += 1;
+        self.hits += 1;
+        Some(slot)
+    }
+
     /// Mark a miss-filled slot as holding valid weights.
     pub fn publish(&mut self, layer: Layer, slot: Slot) {
         self.layers[layer as usize].slots[slot as usize].ready = true;
@@ -207,6 +223,20 @@ mod tests {
         // insert evicts one of the newcomers, not expert 0.
         let Lookup::Miss { evicted, .. } = c.acquire(0, 3) else { panic!() };
         assert_ne!(evicted, Some(0));
+    }
+
+    #[test]
+    fn lookup_ready_never_inserts() {
+        let mut c = ExpertCache::new(1, 2, 1000);
+        assert_eq!(c.lookup_ready(0, 3), None);
+        let Lookup::Miss { slot, .. } = c.acquire(0, 3) else { panic!() };
+        // In flight: not ready yet.
+        assert_eq!(c.lookup_ready(0, 3), None);
+        c.publish(0, slot);
+        c.release(0, slot);
+        let got = c.lookup_ready(0, 3).expect("ready hit");
+        assert_eq!(got, slot);
+        c.release(0, got);
     }
 
     #[test]

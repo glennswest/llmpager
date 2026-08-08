@@ -25,15 +25,16 @@ impl AnyDecoder {
         max_seq: usize,
         core_q4: bool,
         direct: bool,
+        ram_bytes: u64,
     ) -> Result<Self> {
         let meta = llmpager_core::pack::PackReader::open(pack)?.meta().clone();
         if kimi::KimiConfig::is_kimi(&meta.config) {
             Ok(AnyDecoder::Kimi(kimi::KimiDecoder::new(
-                pack, core, slots, io_threads, max_seq, direct,
+                pack, core, slots, io_threads, max_seq, direct, ram_bytes,
             )?))
         } else {
             Ok(AnyDecoder::Qwen(decode::Decoder::new(
-                pack, core, slots, io_threads, max_seq, core_q4, direct,
+                pack, core, slots, io_threads, max_seq, core_q4, direct, ram_bytes,
             )?))
         }
     }
