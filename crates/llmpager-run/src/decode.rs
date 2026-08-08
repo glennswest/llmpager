@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use llmpager_core::pack::PackReader;
-use llmpager_core::quant::q4g64_bytes;
 use llmpager_cuda::driver::{CUdeviceptr, CUstream, Cuda};
 use llmpager_cuda::kernels::Kernels;
 use llmpager_cuda::pager::{Pager, PagerConfig};
@@ -32,7 +31,8 @@ fn mat_gemv(
     st: CUstream,
 ) -> Result<()> {
     if m.q4 {
-        ke.q4g64_gemv(cu, m.dev, x, y, m.rows, m.cols, st)
+        // Load-time core requantization always uses our native group 64.
+        ke.q4g64_gemv(cu, m.dev, x, y, m.rows, m.cols, 64, st)
     } else {
         ke.bf16_gemv(cu, m.dev, x, y, m.rows, m.cols, st)
     }
@@ -75,6 +75,8 @@ pub struct Decoder {
     gate_off: u64,
     up_off: u64,
     down_off: u64,
+    /// q4 group size of the expert pack (64 native, 32 repacked QAT).
+    expert_group: i32,
     logits_host: Vec<u8>,
     router_host: Vec<u8>,
     // Deferred expert-handle release: handles stay pinned until the compute
@@ -96,9 +98,11 @@ impl Decoder {
     ) -> Result<Self> {
         let meta = PackReader::open(pack_path)?.meta().clone();
         let cfg = Config::from_json(&meta.config)?;
-        if meta.dtype != "q4g64-gud" {
-            bail!("pack dtype {} unsupported (want q4g64-gud)", meta.dtype);
-        }
+        let expert_group: i32 = match meta.dtype.as_str() {
+            "q4g64-gud" => 64,
+            "q4g32-gud" => 32,
+            other => bail!("pack dtype {other} unsupported (want q4g64-gud or q4g32-gud)"),
+        };
 
         let cuda = Arc::new(Cuda::init()?);
         let kernels = Kernels::load(&cuda)?;
@@ -129,7 +133,8 @@ impl Decoder {
             vcache.push(f(cfg.kv_heads * max_seq * cfg.head_dim)?);
         }
 
-        let gate_bytes = q4g64_bytes(cfg.moe_inter, cfg.hidden) as u64;
+        let gate_bytes =
+            llmpager_core::quant::q4_bytes(cfg.moe_inter, cfg.hidden, expert_group as usize) as u64;
         Ok(Self {
             h: f(cfg.hidden)?,
             h_norm: f(cfg.hidden)?,
@@ -152,6 +157,7 @@ impl Decoder {
             gate_off: 32,
             up_off: 32 + gate_bytes,
             down_off: 32 + 2 * gate_bytes,
+            expert_group,
             logits_host: vec![0u8; cfg.vocab * 4],
             router_host: vec![0u8; cfg.experts * 4],
             release_events: (0..8).map(|_| cuda.event()).collect::<Result<_>>()?,
@@ -267,10 +273,10 @@ impl Decoder {
             cu.htod_async(self.d_expert_ptrs, &ptrs, st)?;
             cu.htod_async(self.d_expert_wts, &wts, st)?;
             let inter = c.moe_inter as i32;
-            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.gate_off, self.h_norm, 0, self.gate_out, inter, hid, e, st)?;
-            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.up_off, self.h_norm, 0, self.up_out, inter, hid, e, st)?;
+            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.gate_off, self.h_norm, 0, self.gate_out, inter, hid, self.expert_group, e, st)?;
+            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.up_off, self.h_norm, 0, self.up_out, inter, hid, self.expert_group, e, st)?;
             ke.silu_mul(cu, self.gate_out, self.up_out, self.act_out, e * inter, st)?;
-            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, e, st)?;
+            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, self.expert_group, e, st)?;
             ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, self.h, e, hid, st)?;
             // Handles pin cache slots; a release must not let a new fetch
             // overwrite a slot the enqueued GEMVs haven't read yet. Record

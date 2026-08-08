@@ -23,7 +23,8 @@ extern "C" __global__ void q4g64_gemv_batch(
     int x_stride,
     float* __restrict__ y,
     int rows,
-    int cols)
+    int cols,
+    int group)
 {
     const int e = blockIdx.y;
     const unsigned char* blob = reinterpret_cast<const unsigned char*>(blobs[e] + region_off);
@@ -35,7 +36,8 @@ extern "C" __global__ void q4g64_gemv_batch(
     const int lane = threadIdx.x & 31;
     if (row >= rows) return;
 
-    const int groups = cols >> 6;
+    const int groups = cols / group;
+    const int words = group >> 3;
     const unsigned char* scales = blob;
     const unsigned char* data = blob + (size_t)rows * groups * 2;
 
@@ -44,17 +46,17 @@ extern "C" __global__ void q4g64_gemv_batch(
         const __half s = *reinterpret_cast<const __half*>(
             scales + ((size_t)row * groups + g) * 2);
         const float sf = __half2float(s);
-        const unsigned int* dp =
-            reinterpret_cast<const unsigned int*>(data + (size_t)row * (cols >> 1) + (size_t)g * 32);
-        const float4* x4 = reinterpret_cast<const float4*>(xe + g * 64);
+        const unsigned int* dp = reinterpret_cast<const unsigned int*>(
+            data + (size_t)row * (cols >> 1) + (size_t)g * (group >> 1));
+        const float4* x4 = reinterpret_cast<const float4*>(xe + (size_t)g * group);
         float sum = 0.f;
         // fp16 magic-number unpack: OR nibbles into the fp16 mantissa at
         // exponent 1024 (0x6400), subtract 1032 (= 1024 + zero-point 8) in
         // half2 — two dequantized values per 3 ALU ops instead of ~10.
-        // Pair layout: (b & 0x000F000F) yields values (v0, v4), etc.
+        // Pair layout within each word: (b & 0x000F000F) = (v0, v4), etc.
         const __half2 bias = __floats2half2_rn(1032.f, 1032.f);
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
+#pragma unroll 8
+        for (int i = 0; i < words; ++i) {
             const unsigned int b = dp[i];
             const float4 xa = x4[2 * i];
             const float4 xb = x4[2 * i + 1];
@@ -101,14 +103,16 @@ extern "C" __global__ void q4g64_gemv(
     const float* __restrict__ x,
     float* __restrict__ y,
     int rows,
-    int cols)
+    int cols,
+    int group)
 {
     const int warps_per_block = blockDim.x >> 5;
     const int row = blockIdx.x * warps_per_block + (threadIdx.x >> 5);
     const int lane = threadIdx.x & 31;
     if (row >= rows) return;
 
-    const int groups = cols >> 6;
+    const int groups = cols / group;
+    const int words = group >> 3; // uint words of nibble data per group
     const unsigned char* scales = blob;
     const unsigned char* data = blob + (size_t)rows * groups * 2;
 
@@ -117,20 +121,19 @@ extern "C" __global__ void q4g64_gemv(
         const __half s = *reinterpret_cast<const __half*>(
             scales + ((size_t)row * groups + g) * 2);
         const float sf = __half2float(s);
-        // 32 data bytes per group as 8 uint loads; x as float4 pairs.
-        // (Data region offset is even*32 from a 4096-aligned blob base, so
-        // 4-byte loads are aligned.)
-        const unsigned int* dp =
-            reinterpret_cast<const unsigned int*>(data + (size_t)row * (cols >> 1) + (size_t)g * 32);
-        const float4* x4 = reinterpret_cast<const float4*>(x + g * 64);
+        // group/2 data bytes per group as uint loads; x as float4 pairs.
+        // (Data region offset stays 4-byte aligned for any group %8==0.)
+        const unsigned int* dp = reinterpret_cast<const unsigned int*>(
+            data + (size_t)row * (cols >> 1) + (size_t)g * (group >> 1));
+        const float4* x4 = reinterpret_cast<const float4*>(x + (size_t)g * group);
         float sum = 0.f;
         // fp16 magic-number unpack: OR nibbles into the fp16 mantissa at
         // exponent 1024 (0x6400), subtract 1032 (= 1024 + zero-point 8) in
         // half2 — two dequantized values per 3 ALU ops instead of ~10.
-        // Pair layout: (b & 0x000F000F) yields values (v0, v4), etc.
+        // Pair layout within each word: (b & 0x000F000F) = (v0, v4), etc.
         const __half2 bias = __floats2half2_rn(1032.f, 1032.f);
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
+#pragma unroll 8
+        for (int i = 0; i < words; ++i) {
             const unsigned int b = dp[i];
             const float4 xa = x4[2 * i];
             const float4 xb = x4[2 * i + 1];

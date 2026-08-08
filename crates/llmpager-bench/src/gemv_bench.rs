@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Result};
-use llmpager_core::quant::{q4g64_bytes, q4g64_dequantize, q4g64_quantize};
+use llmpager_core::quant::{q4_bytes, q4_dequantize, q4_quantize};
 use llmpager_cuda::driver::Cuda;
 use llmpager_cuda::kernels::Kernels;
 
@@ -17,19 +17,20 @@ pub fn run(f: &Flags) -> Result<()> {
     let rows = f.num("rows", 768) as usize;
     let cols = f.num("cols", 2048) as usize;
     let iters = f.num("iters", 2000) as usize;
+    let group = f.num("group", 64) as usize;
 
-    println!("gemv: {rows}x{cols} q4g64, {iters} iters");
+    println!("gemv: {rows}x{cols} q4 group-{group}, {iters} iters");
     let mut rng = Rng::new(11);
     let w: Vec<f32> = (0..rows * cols).map(|_| (rng.unit() as f32 - 0.5) * 0.2).collect();
     let x: Vec<f32> = (0..cols).map(|_| (rng.unit() as f32 - 0.5) * 2.0).collect();
 
-    let mut blob = vec![0u8; q4g64_bytes(rows, cols)];
-    q4g64_quantize(&w, rows, cols, &mut blob)?;
+    let mut blob = vec![0u8; q4_bytes(rows, cols, group)];
+    q4_quantize(&w, rows, cols, group, &mut blob)?;
 
     // CPU reference from the dequantized weights (so quantization error
     // itself doesn't count against the kernel).
     let mut wd = vec![0f32; rows * cols];
-    q4g64_dequantize(&blob, rows, cols, &mut wd)?;
+    q4_dequantize(&blob, rows, cols, group, &mut wd)?;
     let mut y_ref = vec![0f32; rows];
     for r in 0..rows {
         y_ref[r] = wd[r * cols..(r + 1) * cols]
@@ -48,7 +49,7 @@ pub fn run(f: &Flags) -> Result<()> {
     let d_y = cuda.alloc_device(rows * 4)?;
     cuda.htod_async(d_blob, &blob, stream)?;
     cuda.htod_async(d_x, bytemuck_f32(&x), stream)?;
-    kernels.q4g64_gemv(&cuda, d_blob, d_x, d_y, rows as i32, cols as i32, stream)?;
+    kernels.q4g64_gemv(&cuda, d_blob, d_x, d_y, rows as i32, cols as i32, group as i32, stream)?;
     let mut y_gpu_bytes = vec![0u8; rows * 4];
     cuda.dtoh_async(&mut y_gpu_bytes, d_y, stream)?;
     cuda.sync_stream(stream)?;
@@ -71,13 +72,13 @@ pub fn run(f: &Flags) -> Result<()> {
 
     let t0 = Instant::now();
     for _ in 0..iters {
-        kernels.q4g64_gemv(&cuda, d_blob, d_x, d_y, rows as i32, cols as i32, stream)?;
+        kernels.q4g64_gemv(&cuda, d_blob, d_x, d_y, rows as i32, cols as i32, group as i32, stream)?;
     }
     cuda.sync_stream(stream)?;
     let secs = t0.elapsed().as_secs_f64();
     let bytes = blob.len() as f64 * iters as f64;
     println!(
-        "gemv q4g64: {:.1} us/launch, {:.1} GB/s weight throughput",
+        "gemv q4 g{}: {:.1} us/launch, {:.1} GB/s weight throughput", group,
         secs * 1e6 / iters as f64,
         bytes / 1e9 / secs
     );

@@ -16,39 +16,56 @@ use anyhow::{bail, Result};
 
 pub const GROUP: usize = 64;
 
+/// Bytes a q4 tensor occupies at a given group size: scales then data.
+pub fn q4_bytes(rows: usize, cols: usize, group: usize) -> usize {
+    rows * (cols / group) * 2 + rows * cols / 2
+}
+
 /// Bytes a quantized `[rows, cols]` tensor occupies: scales then data.
 pub fn q4g64_bytes(rows: usize, cols: usize) -> usize {
-    rows * (cols / GROUP) * 2 + rows * cols / 2
+    q4_bytes(rows, cols, GROUP)
 }
 
 /// Quantize `src` (row-major f32, `rows * cols`) into `dst`, which must be
 /// exactly [`q4g64_bytes`] long. Returns the maximum absolute error.
 pub fn q4g64_quantize(src: &[f32], rows: usize, cols: usize, dst: &mut [u8]) -> Result<f32> {
-    if cols % GROUP != 0 {
-        bail!("cols {cols} not a multiple of {GROUP}");
+    q4_quantize(src, rows, cols, GROUP, dst)
+}
+
+/// Group-parametric quantize (group must divide cols; 32 for repacked
+/// QAT-int4 checkpoints like Kimi K2.6, 64 for our own packs).
+pub fn q4_quantize(
+    src: &[f32],
+    rows: usize,
+    cols: usize,
+    group: usize,
+    dst: &mut [u8],
+) -> Result<f32> {
+    if group == 0 || group % 8 != 0 || cols % group != 0 {
+        bail!("cols {cols} not compatible with group {group}");
     }
     if src.len() != rows * cols {
         bail!("src length {} != {rows}x{cols}", src.len());
     }
-    if dst.len() != q4g64_bytes(rows, cols) {
-        bail!("dst length {} != {}", dst.len(), q4g64_bytes(rows, cols));
+    if dst.len() != q4_bytes(rows, cols, group) {
+        bail!("dst length {} != {}", dst.len(), q4_bytes(rows, cols, group));
     }
-    let groups_per_row = cols / GROUP;
+    let groups_per_row = cols / group;
     let scales_len = rows * groups_per_row * 2;
     let (scales, data) = dst.split_at_mut(scales_len);
 
     let mut max_err = 0.0f32;
     for r in 0..rows {
         for g in 0..groups_per_row {
-            let vals = &src[r * cols + g * GROUP..r * cols + (g + 1) * GROUP];
+            let vals = &src[r * cols + g * group..r * cols + (g + 1) * group];
             let amax = vals.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             // Denormal-small scales round-trip badly through f16; clamp up.
             let scale = f16_round(if amax > 0.0 { amax / 7.0 } else { 1e-8 }).max(1e-7);
             let sidx = (r * groups_per_row + g) * 2;
             scales[sidx..sidx + 2].copy_from_slice(&f32_to_f16_bits(scale).to_le_bytes());
 
-            let base = r * cols / 2 + g * GROUP / 2;
-            for i in 0..GROUP / 2 {
+            let base = r * cols / 2 + g * group / 2;
+            for i in 0..group / 2 {
                 let q0 = quantize_one(vals[2 * i], scale, &mut max_err);
                 let q1 = quantize_one(vals[2 * i + 1], scale, &mut max_err);
                 data[base + i] = (q0 as u8 & 0x0F) | ((q1 as u8 & 0x0F) << 4);
@@ -56,6 +73,30 @@ pub fn q4g64_quantize(src: &[f32], rows: usize, cols: usize, dst: &mut [u8]) -> 
         }
     }
     Ok(max_err)
+}
+
+/// Write one already-quantized group directly: `qs` are nibble values
+/// (q+8, 0..=15), `scale` is the f16-rounded group scale. Used by
+/// checkpoint repackers that must preserve QAT weights bit-exactly.
+pub fn q4_store_group(
+    dst: &mut [u8],
+    rows: usize,
+    cols: usize,
+    group: usize,
+    row: usize,
+    g: usize,
+    scale: f32,
+    qs: &[u8],
+) {
+    let groups_per_row = cols / group;
+    let scales_len = rows * groups_per_row * 2;
+    let (scales, data) = dst.split_at_mut(scales_len);
+    let sidx = (row * groups_per_row + g) * 2;
+    scales[sidx..sidx + 2].copy_from_slice(&f32_to_f16_bits(scale).to_le_bytes());
+    let base = row * cols / 2 + g * group / 2;
+    for i in 0..group / 2 {
+        data[base + i] = (qs[2 * i] & 0x0F) | ((qs[2 * i + 1] & 0x0F) << 4);
+    }
 }
 
 fn quantize_one(x: f32, scale: f32, max_err: &mut f32) -> i32 {
@@ -70,21 +111,35 @@ fn quantize_one(x: f32, scale: f32, max_err: &mut f32) -> i32 {
 /// Dequantize back to f32 (reference implementation; the GPU kernel is the
 /// production consumer of this format).
 pub fn q4g64_dequantize(buf: &[u8], rows: usize, cols: usize, out: &mut [f32]) -> Result<()> {
-    if cols % GROUP != 0 || buf.len() != q4g64_bytes(rows, cols) || out.len() != rows * cols {
-        bail!("q4g64_dequantize: bad dimensions");
+    q4_dequantize(buf, rows, cols, GROUP, out)
+}
+
+pub fn q4_dequantize(
+    buf: &[u8],
+    rows: usize,
+    cols: usize,
+    group: usize,
+    out: &mut [f32],
+) -> Result<()> {
+    if group == 0
+        || cols % group != 0
+        || buf.len() != q4_bytes(rows, cols, group)
+        || out.len() != rows * cols
+    {
+        bail!("q4_dequantize: bad dimensions");
     }
-    let groups_per_row = cols / GROUP;
+    let groups_per_row = cols / group;
     let scales_len = rows * groups_per_row * 2;
     let (scales, data) = buf.split_at(scales_len);
     for r in 0..rows {
         for g in 0..groups_per_row {
             let sidx = (r * groups_per_row + g) * 2;
             let scale = f16_bits_to_f32(u16::from_le_bytes([scales[sidx], scales[sidx + 1]]));
-            let base = r * cols / 2 + g * GROUP / 2;
-            for i in 0..GROUP / 2 {
+            let base = r * cols / 2 + g * group / 2;
+            for i in 0..group / 2 {
                 let b = data[base + i];
-                out[r * cols + g * GROUP + 2 * i] = ((b & 0x0F) as i32 - 8) as f32 * scale;
-                out[r * cols + g * GROUP + 2 * i + 1] = ((b >> 4) as i32 - 8) as f32 * scale;
+                out[r * cols + g * group + 2 * i] = ((b & 0x0F) as i32 - 8) as f32 * scale;
+                out[r * cols + g * group + 2 * i + 1] = ((b >> 4) as i32 - 8) as f32 * scale;
             }
         }
     }
@@ -93,7 +148,7 @@ pub fn q4g64_dequantize(buf: &[u8], rows: usize, cols: usize, out: &mut [f32]) -
 
 // f16 helpers (scales only) — kept dependency-free.
 
-fn f32_to_f16_bits(x: f32) -> u16 {
+pub fn f32_to_f16_bits(x: f32) -> u16 {
     let b = x.to_bits();
     let sign = ((b >> 16) & 0x8000) as u16;
     let exp = ((b >> 23) & 0xFF) as i32;
@@ -115,7 +170,7 @@ fn f32_to_f16_bits(x: f32) -> u16 {
     sign | ((e as u32) << 10) as u16 | ((frac + 0x1000) >> 13) as u16
 }
 
-fn f16_bits_to_f32(h: u16) -> f32 {
+pub fn f16_bits_to_f32(h: u16) -> f32 {
     let sign = ((h & 0x8000) as u32) << 16;
     let exp = ((h >> 10) & 0x1F) as u32;
     let frac = (h & 0x3FF) as u32;
@@ -151,6 +206,41 @@ mod tests {
                 ((s >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0) as f32 * 0.1
             })
             .collect()
+    }
+
+    #[test]
+    fn g32_round_trip_and_store_group() -> Result<()> {
+        let (rows, cols, group) = (4, 128, 32);
+        let src = pseudo(rows * cols, 9);
+        let mut buf = vec![0u8; q4_bytes(rows, cols, group)];
+        let max_err = q4_quantize(&src, rows, cols, group, &mut buf)?;
+        let mut back = vec![0f32; rows * cols];
+        q4_dequantize(&buf, rows, cols, group, &mut back)?;
+        for (a, b) in src.iter().zip(back.iter()) {
+            assert!((a - b).abs() <= max_err + 1e-6);
+        }
+
+        // Rebuild the same buffer group-by-group via q4_store_group: read
+        // each group's scale + nibbles back out and re-store them.
+        let mut buf2 = vec![0u8; buf.len()];
+        let groups_per_row = cols / group;
+        let scales_len = rows * groups_per_row * 2;
+        for r in 0..rows {
+            for g in 0..groups_per_row {
+                let sidx = (r * groups_per_row + g) * 2;
+                let scale =
+                    f16_bits_to_f32(u16::from_le_bytes([buf[sidx], buf[sidx + 1]]));
+                let base = scales_len + r * cols / 2 + g * group / 2;
+                let mut qs = vec![0u8; group];
+                for i in 0..group / 2 {
+                    qs[2 * i] = buf[base + i] & 0x0F;
+                    qs[2 * i + 1] = buf[base + i] >> 4;
+                }
+                q4_store_group(&mut buf2, rows, cols, group, r, g, scale, &qs);
+            }
+        }
+        assert_eq!(buf, buf2);
+        Ok(())
     }
 
     #[test]

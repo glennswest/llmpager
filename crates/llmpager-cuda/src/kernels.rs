@@ -53,7 +53,9 @@ impl Kernels {
         })
     }
 
-    /// y[rows] = W x, W a q4g64 blob region (scales then nibbles).
+    /// y[rows] = W x, W a q4 blob region (scales then nibbles), `group`
+    /// values per scale (64 for our packs, 32 for repacked QAT int4).
+    #[allow(clippy::too_many_arguments)]
     pub fn q4g64_gemv(
         &self,
         cuda: &Cuda,
@@ -62,11 +64,13 @@ impl Kernels {
         y: CUdeviceptr,
         rows: i32,
         cols: i32,
+        group: i32,
         stream: CUstream,
     ) -> Result<()> {
         const WARPS: u32 = 4;
-        let (mut blob, mut x, mut y, mut rows_a, mut cols_a) = (blob, x, y, rows, cols);
-        let mut p = params![blob, x, y, rows_a, cols_a];
+        let (mut blob, mut x, mut y, mut rows_a, mut cols_a, mut group_a) =
+            (blob, x, y, rows, cols, group);
+        let mut p = params![blob, x, y, rows_a, cols_a, group_a];
         cuda.launch(
             self.q4g64_gemv,
             ((rows as u32).div_ceil(WARPS), 1, 1),
@@ -91,13 +95,14 @@ impl Kernels {
         y: CUdeviceptr,
         rows: i32,
         cols: i32,
+        group: i32,
         experts: i32,
         stream: CUstream,
     ) -> Result<()> {
         const WARPS: u32 = 4;
         let (mut blobs, mut off, mut x, mut xs, mut y) = (blobs, region_off, x, x_stride, y);
-        let (mut rows_a, mut cols_a) = (rows, cols);
-        let mut p = params![blobs, off, x, xs, y, rows_a, cols_a];
+        let (mut rows_a, mut cols_a, mut group_a) = (rows, cols, group);
+        let mut p = params![blobs, off, x, xs, y, rows_a, cols_a, group_a];
         cuda.launch(
             self.q4g64_gemv_batch,
             ((rows as u32).div_ceil(WARPS), experts as u32, 1),
