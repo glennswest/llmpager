@@ -17,6 +17,16 @@
       "tokenizer": "/data/models/qwen3-coder-30b-a3b",
       "slots": 24,
       "direct": false
+    },
+    {
+      "name": "kimi-k2.6",
+      "pack": "/data/models/kimi-k2.6.llmpk",
+      "core": "/data/models/kimi-k2.6.core.safetensors",
+      "tokenizer": "/data/models/kimi-k2.6/tokenizer.json",
+      "slots": 4,
+      "slots_solo": 4,
+      "io_threads": 8,
+      "direct": true
     }
   ]
 }
