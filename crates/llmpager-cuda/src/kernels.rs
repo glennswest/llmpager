@@ -25,8 +25,10 @@ pub struct Kernels {
     add_f32: CUfunction,
     scale_add_f32: CUfunction,
     kv_append_f32: CUfunction,
+    kv_append_f16: CUfunction,
     rope_f32: CUfunction,
     attn_decode_f32: CUfunction,
+    attn_decode_f16kv: CUfunction,
     bf16_row_to_f32: CUfunction,
     mla_rope_f32: CUfunction,
     mla_attn_decode_f32: CUfunction,
@@ -57,8 +59,10 @@ impl Kernels {
             add_f32: cuda.function(de, "add_f32")?,
             scale_add_f32: cuda.function(de, "scale_add_f32")?,
             kv_append_f32: cuda.function(de, "kv_append_f32")?,
+            kv_append_f16: cuda.function(de, "kv_append_f16")?,
             rope_f32: cuda.function(de, "rope_f32")?,
             attn_decode_f32: cuda.function(de, "attn_decode_f32")?,
+            attn_decode_f16kv: cuda.function(de, "attn_decode_f16kv")?,
             bf16_row_to_f32: cuda.function(de, "bf16_row_to_f32")?,
         })
     }
@@ -183,13 +187,15 @@ impl Kernels {
         head_dim: i32,
         pos: i32,
         max_seq: i32,
+        f16: bool,
         stream: CUstream,
     ) -> Result<()> {
         let n = (kv_heads * head_dim) as usize;
         let (mut k, mut v, mut kc, mut vc) = (k, v, kcache, vcache);
         let (mut kvh, mut hd, mut pos_a, mut ms) = (kv_heads, head_dim, pos, max_seq);
         let mut p = params![k, v, kc, vc, kvh, hd, pos_a, ms];
-        cuda.launch(self.kv_append_f32, (grid_1d(n, 256), 1, 1), (256, 1, 1), &mut p, stream)
+        let f = if f16 { self.kv_append_f16 } else { self.kv_append_f32 };
+        cuda.launch(f, (grid_1d(n, 256), 1, 1), (256, 1, 1), &mut p, stream)
     }
 
     /// y[rows] = W x, W bf16 [rows, cols].
@@ -277,13 +283,15 @@ impl Kernels {
         seq_len: i32,
         max_seq: i32,
         scale: f32,
+        f16: bool,
         stream: CUstream,
     ) -> Result<()> {
         let (mut q, mut k, mut v, mut o, mut s) = (q, kcache, vcache, out, scratch);
         let (mut h, mut kvh, mut hd, mut sl, mut ms, mut sc) =
             (heads, kv_heads, head_dim, seq_len, max_seq, scale);
         let mut p = params![q, k, v, o, s, h, kvh, hd, sl, ms, sc];
-        cuda.launch(self.attn_decode_f32, (heads as u32, 1, 1), (256, 1, 1), &mut p, stream)
+        let f = if f16 { self.attn_decode_f16kv } else { self.attn_decode_f32 };
+        cuda.launch(f, (heads as u32, 1, 1), (256, 1, 1), &mut p, stream)
     }
 
     /// out[n] = f32(table[row, :n]) — embedding row gather.

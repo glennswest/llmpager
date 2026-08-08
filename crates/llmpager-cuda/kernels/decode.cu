@@ -236,6 +236,94 @@ extern "C" __global__ void attn_decode_f32(
     }
 }
 
+// f16 KV variants: same shapes and math, caches stored __half (halves KV
+// VRAM — the enabler for multi-sequence batching). Scores/softmax stay f32.
+
+extern "C" __global__ void kv_append_f16(
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    __half* __restrict__ kcache,
+    __half* __restrict__ vcache,
+    int kv_heads,
+    int head_dim,
+    int pos,
+    int max_seq)
+{
+    const int total = kv_heads * head_dim;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total;
+         i += gridDim.x * blockDim.x) {
+        const int h = i / head_dim;
+        const int d = i % head_dim;
+        const size_t dst = ((size_t)h * max_seq + pos) * head_dim + d;
+        kcache[dst] = __float2half(k[i]);
+        vcache[dst] = __float2half(v[i]);
+    }
+}
+
+extern "C" __global__ void attn_decode_f16kv(
+    const float* __restrict__ q,
+    const __half* __restrict__ kcache,
+    const __half* __restrict__ vcache,
+    float* __restrict__ out,
+    float* __restrict__ scratch,
+    int heads,
+    int kv_heads,
+    int head_dim,
+    int seq_len,
+    int max_seq,
+    float scale)
+{
+    const int h = blockIdx.x;
+    if (h >= heads) return;
+    const int kv = h / (heads / kv_heads);
+    const float* qh = q + (size_t)h * head_dim;
+    const __half* kh = kcache + (size_t)kv * max_seq * head_dim;
+    const __half* vh = vcache + (size_t)kv * max_seq * head_dim;
+    float* sc = scratch + (size_t)h * max_seq;
+    __shared__ float red[256];
+
+    float lmax = -1e30f;
+    for (int p = threadIdx.x; p < seq_len; p += blockDim.x) {
+        const __half* kp = kh + (size_t)p * head_dim;
+        float dot = 0.f;
+        for (int d = 0; d < head_dim; ++d) dot += qh[d] * __half2float(kp[d]);
+        const float s = dot * scale;
+        sc[p] = s;
+        lmax = fmaxf(lmax, s);
+    }
+    red[threadIdx.x] = lmax;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) red[threadIdx.x] = fmaxf(red[threadIdx.x], red[threadIdx.x + s]);
+        __syncthreads();
+    }
+    const float m = red[0];
+    __syncthreads();
+
+    float lsum = 0.f;
+    for (int p = threadIdx.x; p < seq_len; p += blockDim.x) {
+        const float e = __expf(sc[p] - m);
+        sc[p] = e;
+        lsum += e;
+    }
+    red[threadIdx.x] = lsum;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    const float invz = 1.f / red[0];
+    __syncthreads();
+
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float acc = 0.f;
+        for (int p = 0; p < seq_len; ++p) {
+            acc += sc[p] * __half2float(vh[(size_t)p * head_dim + d]);
+        }
+        out[(size_t)h * head_dim + d] = acc * invz;
+    }
+}
+
 // Copy one bf16 row (e.g. an embedding) to f32.
 extern "C" __global__ void bf16_row_to_f32(
     const unsigned short* __restrict__ table,

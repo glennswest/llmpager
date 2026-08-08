@@ -121,7 +121,7 @@ pub fn run(_f: &Flags) -> Result<()> {
         let dvc = g.up(&vec![0u8; kv_heads * max_seq * hd * 4])?;
         g.kernels.kv_append(
             &cuda, dk, dv, dkc, dvc,
-            kv_heads as i32, hd as i32, pos as i32, max_seq as i32, stream,
+            kv_heads as i32, hd as i32, pos as i32, max_seq as i32, false, stream,
         )?;
         let kc = g.down_f32(dkc, kv_heads * max_seq * hd)?;
         let mut want = vec![0f32; kv_heads * max_seq * hd];
@@ -220,9 +220,26 @@ pub fn run(_f: &Flags) -> Result<()> {
         g.kernels.attn_decode(
             &cuda, dq, dk, dv, dout, dscratch,
             heads as i32, kv_heads as i32, hd as i32,
-            seq as i32, max_seq as i32, scale, stream,
+            seq as i32, max_seq as i32, scale, false, stream,
         )?;
         check("attn_decode", &g.down_f32(dout, heads * hd)?, &want, 1e-3)?;
+
+        // f16 KV variant: convert the caches to half and re-run.
+        let khalf: Vec<u8> = k
+            .iter()
+            .flat_map(|x| llmpager_core::quant::f32_to_f16_bits(*x).to_le_bytes())
+            .collect();
+        let vhalf: Vec<u8> = v
+            .iter()
+            .flat_map(|x| llmpager_core::quant::f32_to_f16_bits(*x).to_le_bytes())
+            .collect();
+        let (dk16, dv16) = (g.up(&khalf)?, g.up(&vhalf)?);
+        g.kernels.attn_decode(
+            &cuda, dq, dk16, dv16, dout, dscratch,
+            heads as i32, kv_heads as i32, hd as i32,
+            seq as i32, max_seq as i32, scale, true, stream,
+        )?;
+        check("attn_decode_f16kv", &g.down_f32(dout, heads * hd)?, &want, 5e-3)?;
     }
 
     // bf16_row

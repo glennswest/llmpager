@@ -77,6 +77,8 @@ pub struct Decoder {
     down_off: u64,
     /// q4 group size of the expert pack (64 native, 32 repacked QAT).
     expert_group: i32,
+    /// KV cache stored f16 (default; halves KV VRAM) or f32.
+    kv_f16: bool,
     // Chunked-prefill buffers: whole-chunk hidden states + router logits.
     chunk_cap: usize,
     h_buf: CUdeviceptr,      // [chunk_cap, hidden]
@@ -132,11 +134,13 @@ impl Decoder {
         let f = |n: usize| cuda.alloc_device(n * 4);
         let qkv = cfg.heads * cfg.head_dim;
         let kvd = cfg.kv_heads * cfg.head_dim;
+        let kv_f16 = true;
+        let kv_bytes = cfg.kv_heads * max_seq * cfg.head_dim * if kv_f16 { 2 } else { 4 };
         let mut kcache = Vec::with_capacity(cfg.layers);
         let mut vcache = Vec::with_capacity(cfg.layers);
         for _ in 0..cfg.layers {
-            kcache.push(f(cfg.kv_heads * max_seq * cfg.head_dim)?);
-            vcache.push(f(cfg.kv_heads * max_seq * cfg.head_dim)?);
+            kcache.push(cuda.alloc_device(kv_bytes)?);
+            vcache.push(cuda.alloc_device(kv_bytes)?);
         }
 
         let gate_bytes =
@@ -165,6 +169,7 @@ impl Decoder {
             up_off: 32 + gate_bytes,
             down_off: 32 + 2 * gate_bytes,
             expert_group,
+            kv_f16,
             chunk_cap,
             h_buf: f(chunk_cap * cfg.hidden)?,
             hn_buf: f(chunk_cap * cfg.hidden)?,
@@ -244,13 +249,14 @@ impl Decoder {
             ke.rope(cu, self.k, c.kv_heads as i32, c.head_dim as i32, pos as i32, c.rope_theta, st)?;
             ke.kv_append(
                 cu, self.k, self.v, self.kcache[l], self.vcache[l],
-                c.kv_heads as i32, c.head_dim as i32, pos as i32, self.max_seq as i32, st,
+                c.kv_heads as i32, c.head_dim as i32, pos as i32, self.max_seq as i32,
+                self.kv_f16, st,
             )?;
             ke.attn_decode(
                 cu, self.q, self.kcache[l], self.vcache[l], self.attn_out, self.attn_scratch,
                 c.heads as i32, c.kv_heads as i32, c.head_dim as i32,
                 (pos + 1) as i32, self.max_seq as i32,
-                1.0 / (c.head_dim as f32).sqrt(), st,
+                1.0 / (c.head_dim as f32).sqrt(), self.kv_f16, st,
             )?;
             mat_gemv(ke, cu, &w.o, self.attn_out, self.proj_out, st)?;
             ke.add(cu, self.h, self.proj_out, hid, st)?;
@@ -369,13 +375,14 @@ impl Decoder {
                 ke.rope(cu, self.k, c.kv_heads as i32, c.head_dim as i32, pos as i32, c.rope_theta, st)?;
                 ke.kv_append(
                     cu, self.k, self.v, self.kcache[l], self.vcache[l],
-                    c.kv_heads as i32, c.head_dim as i32, pos as i32, self.max_seq as i32, st,
+                    c.kv_heads as i32, c.head_dim as i32, pos as i32, self.max_seq as i32,
+                    self.kv_f16, st,
                 )?;
                 ke.attn_decode(
                     cu, self.q, self.kcache[l], self.vcache[l], self.attn_out, self.attn_scratch,
                     c.heads as i32, c.kv_heads as i32, c.head_dim as i32,
                     (pos + 1) as i32, self.max_seq as i32,
-                    1.0 / (c.head_dim as f32).sqrt(), st,
+                    1.0 / (c.head_dim as f32).sqrt(), self.kv_f16, st,
                 )?;
                 mat_gemv(ke, cu, &w.o, self.attn_out, self.proj_out, st)?;
                 ke.add(cu, ht, self.proj_out, hid, st)?;
