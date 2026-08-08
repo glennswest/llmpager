@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use llmpager_run::decode::Decoder;
+use llmpager_run::any::AnyDecoder;
+use llmpager_run::sample::{sample, SampleRng, Sampling};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter().find_map(|a| a.strip_prefix(&format!("--{key}=")).map(String::from))
@@ -37,7 +38,7 @@ struct ModelSpec {
 }
 
 struct Engine {
-    dec: Decoder,
+    dec: AnyDecoder,
     tok: tokenizers::Tokenizer,
     cur_slots: u32,
 }
@@ -104,7 +105,7 @@ impl Registry {
             };
             let tok = tokenizers::Tokenizer::from_file(&tok_file)
                 .map_err(|e| anyhow::anyhow!("loading {}: {e}", tok_file.display()))?;
-            let dec = Decoder::new(
+            let dec = AnyDecoder::new(
                 &spec.pack, &spec.core, slots, spec.io_threads, 4096, false, spec.direct,
             )?;
             Ok(Engine { dec, tok, cur_slots: slots })
@@ -130,12 +131,13 @@ impl Registry {
     }
 }
 
-/// Generate greedily; when `on_delta` is given, call it with each new text
-/// fragment as it decodes (streaming).
+/// Generate with the given sampling settings (greedy when temperature 0);
+/// when `on_delta` is given, call it with each new text fragment (streaming).
 fn generate(
     engine: &mut Engine,
     prompt: &str,
     max_tokens: usize,
+    sampling: &Sampling,
     mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> Result<(String, usize, usize, f64)> {
     let ids = engine
@@ -148,14 +150,24 @@ fn generate(
         bail!("empty prompt after tokenization");
     }
     let t0 = Instant::now();
+    // Union prefill: chunked so each layer fetches each expert once per chunk.
     let mut next = 0u32;
-    for (pos, id) in ids.iter().enumerate() {
-        next = engine.dec.step(*id, pos, pos + 1 == ids.len())?;
+    let cap = engine.dec.chunk_cap();
+    let mut pos = 0usize;
+    for chunk in ids.chunks(cap) {
+        let last = pos + chunk.len() == ids.len();
+        next = engine.dec.step_chunk(chunk, pos, last)?;
+        pos += chunk.len();
+    }
+    let plain_greedy = sampling.is_greedy() && sampling.repeat_penalty == 1.0;
+    let mut rng = SampleRng::new(sampling.seed);
+    if !plain_greedy {
+        next = sample(&engine.dec.last_logits(), &[], sampling, &mut rng);
     }
     let mut out_ids: Vec<u32> = Vec::new();
     let mut printed = String::new();
     for i in 0..max_tokens {
-        if engine.dec.cfg.eos.contains(&next) {
+        if engine.dec.eos().contains(&next) {
             break;
         }
         out_ids.push(next);
@@ -173,7 +185,12 @@ fn generate(
         if pos + 1 >= 4096 {
             break;
         }
-        next = engine.dec.step(next, pos, true)?;
+        let greedy = engine.dec.step(next, pos, true)?;
+        next = if plain_greedy {
+            greedy
+        } else {
+            sample(&engine.dec.last_logits(), &out_ids, sampling, &mut rng)
+        };
     }
     let text = engine
         .tok
@@ -218,6 +235,36 @@ fn chat_prompt(messages: &[serde_json::Value]) -> String {
     }
     s.push_str("<|im_start|>assistant\n");
     s
+}
+
+/// Kimi K2.x template (from the checkpoint's chat_template.jinja):
+/// role marker + name + <|im_middle|> + content + <|im_end|>.
+fn kimi_chat_prompt(messages: &[serde_json::Value]) -> String {
+    let mut s = String::new();
+    for m in messages {
+        let role = m["role"].as_str().unwrap_or("user");
+        let content = m["content"].as_str().unwrap_or("");
+        let marker = match role {
+            "user" => "<|im_user|>",
+            "assistant" => "<|im_assistant|>",
+            _ => "<|im_system|>",
+        };
+        s.push_str(&format!("{marker}{role}<|im_middle|>{content}<|im_end|>"));
+    }
+    s.push_str("<|im_assistant|>assistant<|im_middle|>");
+    s
+}
+
+/// OpenAI-style sampling fields; absent fields keep greedy defaults.
+fn sampling_from_request(req: &serde_json::Value) -> Sampling {
+    Sampling {
+        temperature: req["temperature"].as_f64().unwrap_or(0.0) as f32,
+        top_p: req["top_p"].as_f64().unwrap_or(1.0) as f32,
+        top_k: req["top_k"].as_u64().unwrap_or(0) as usize,
+        repeat_penalty: req["repetition_penalty"].as_f64().unwrap_or(1.0) as f32,
+        seed: req["seed"].as_u64().unwrap_or(0x5eed),
+        ..Default::default()
+    }
 }
 
 fn json_response(status: u32, v: &serde_json::Value) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
@@ -334,8 +381,20 @@ fn handle(
             let stream = req["stream"].as_bool().unwrap_or(false);
             let max_tokens =
                 req["max_tokens"].as_u64().unwrap_or(if chat { 256 } else { 128 }) as usize;
+            let sampling = sampling_from_request(&req);
+            // The chat template depends on the engine, so warm it first.
+            let kimi = {
+                let mut r = registry.lock().unwrap();
+                r.warm_up(&model)?;
+                r.warm[0].1.dec.is_kimi()
+            };
             let prompt = if chat {
-                chat_prompt(req["messages"].as_array().context("missing messages")?)
+                let messages = req["messages"].as_array().context("missing messages")?;
+                if kimi {
+                    kimi_chat_prompt(messages)
+                } else {
+                    chat_prompt(messages)
+                }
             } else {
                 req["prompt"].as_str().context("missing prompt")?.to_string()
             };
@@ -369,7 +428,7 @@ fn handle(
                         send(&serde_json::json!({"object": obj, "model": model,
                                                   "choices": [choice]}));
                     };
-                    match generate(engine, &prompt, max_tokens, Some(&mut cb)) {
+                    match generate(engine, &prompt, max_tokens, &sampling, Some(&mut cb)) {
                         Ok((_, p, c, secs)) => {
                             let done_choice = if chat {
                                 serde_json::json!({"index": 0, "delta": {}, "finish_reason": "stop"})
@@ -395,7 +454,7 @@ fn handle(
             let mut r = registry.lock().unwrap();
             r.warm_up(&model)?;
             let engine = &mut r.warm[0].1;
-            let (text, p_toks, c_toks, secs) = generate(engine, &prompt, max_tokens, None)?;
+            let (text, p_toks, c_toks, secs) = generate(engine, &prompt, max_tokens, &sampling, None)?;
             let usage = serde_json::json!({"prompt_tokens": p_toks,
                 "completion_tokens": c_toks, "total_tokens": p_toks + c_toks});
             let perf = serde_json::json!({"seconds": secs,

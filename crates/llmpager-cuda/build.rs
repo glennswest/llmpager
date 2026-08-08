@@ -26,8 +26,16 @@ fn main() {
     });
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    // No nvcc (e.g. developing on macOS): emit placeholder PTX so the crate
+    // compiles; kernel loading fails at runtime, which such hosts never do.
+    let have_nvcc = Command::new(&nvcc).arg("--version").output().is_ok();
     for k in KERNELS {
         let out = out_dir.join(format!("{k}.ptx"));
+        if !have_nvcc {
+            println!("cargo:warning=nvcc not found; embedding empty PTX for {k} (GPU hosts need cuda-nvcc)");
+            std::fs::write(&out, "// no nvcc at build time\n").unwrap();
+            continue;
+        }
         let status = Command::new(&nvcc)
             .args(["--ptx", "-O3", "-arch=compute_80"])
             .arg(format!("kernels/{k}.cu"))
