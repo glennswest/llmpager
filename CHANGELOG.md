@@ -177,3 +177,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 
 ### 2026-08-07 (Kimi)
 - **feat:** M6 started — Kimi K2.6 download to /data (grown to 2TB); arch scoped (DeepseekV3 text stack, int4 g32 QAT, MLA)
+- **feat:** group-parametric q4 (quant fns + GPU kernels + decoder dtype q4g32-gud); g32 verified on GPU at Kimi expert shape (192.5 GB/s); Kimi K2.6 tensor naming + quant scope confirmed from index

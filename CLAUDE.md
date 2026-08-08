@@ -130,12 +130,20 @@ noaux_tc bias + routed_scaling 2.827, vocab 163840. Checkpoint is QAT
 **int4 group-32 symmetric** (compressed-tensors: weight_packed int32 +
 weight_scale), 1.1TB — repack, don't requantize.
 
-- [ ] Core: parametric group size (q4g32 alongside q4g64) — quant,
-      pack blob header already carries `group`
-- [ ] Kernels: q4g32 GEMV + batch variants (16B/group inner loop)
-- [ ] Converter: kimi_k25/deepseek_v3 arch — nested text_config,
-      compressed-tensors int4 repack, shared expert + dense layer 0 +
-      MLA tensors → core, vision tower skipped
+- [x] Core: parametric group size (q4g32 alongside q4g64) — quant fns,
+      q4_store_group for bit-exact repack; 11 tests green
+- [x] Kernels: q4 GEMV + batch generalized to group param; verified on
+      GPU (g32 @ 2048x7168: 1.4e-5, 192.5 GB/s; g64 no regression);
+      decoder reads group from pack dtype (q4g32-gud)
+- [ ] Converter: kimi_k25 arch — tensor names confirmed from index:
+      `language_model.model.layers.L.mlp.experts.E.{gate,up,down}_proj.
+      {weight_packed,weight_scale,weight_shape}` (int4 g32, 0..383);
+      shared_experts + all self_attn (q_a/q_b/kv_a_with_mqa/kv_b/o) +
+      dense layer-0 mlp are plain bf16 `.weight` — QAT covers experts
+      only. Roots mm_projector/vision_tower skipped. Attention bf16 is
+      13.4GB → requantize attention/shared/dense to q4g64 at convert
+      (existing core-q4 path). Packing layout (int32 words vs bytes) to
+      verify from an expert shard header when one lands.
 - [ ] Estimate check (from config): core ~7-8GB int4 in VRAM (MLA attn
       ~6.7B params + shared/dense + lm_head), embed table host-side
       (sparse row gather), MLA KV ~70KB/token → ~250 expert slots in
