@@ -21,27 +21,29 @@ use anyhow::{bail, Context, Result};
 use llmpager_core::pack::{PackMeta, PackWriter};
 use llmpager_core::quant::{q4g64_bytes, q4g64_quantize, GROUP};
 
-/// Blob layout: this fixed header, then gate, up, down as q4g64 regions.
+pub mod kimi;
+
+/// Blob layout: this fixed header, then gate, up, down as q4 regions.
 pub const BLOB_HEADER_BYTES: usize = 32;
 
 #[derive(Debug, Clone)]
-struct TensorLoc {
-    file: usize,
-    dtype: String,
-    shape: Vec<usize>,
+pub(crate) struct TensorLoc {
+    pub(crate) file: usize,
+    pub(crate) dtype: String,
+    pub(crate) shape: Vec<usize>,
     /// Absolute byte range within the shard file.
-    start: u64,
-    end: u64,
+    pub(crate) start: u64,
+    pub(crate) end: u64,
 }
 
-struct Checkpoint {
-    files: Vec<File>,
-    tensors: BTreeMap<String, TensorLoc>,
-    config: serde_json::Value,
+pub(crate) struct Checkpoint {
+    pub(crate) files: Vec<File>,
+    pub(crate) tensors: BTreeMap<String, TensorLoc>,
+    pub(crate) config: serde_json::Value,
 }
 
 impl Checkpoint {
-    fn open(dir: &Path) -> Result<Self> {
+    pub(crate) fn open(dir: &Path) -> Result<Self> {
         let config: serde_json::Value = serde_json::from_slice(
             &std::fs::read(dir.join("config.json")).context("reading config.json")?,
         )?;
@@ -103,13 +105,13 @@ impl Checkpoint {
         Ok(Self { files, tensors, config })
     }
 
-    fn read_raw(&self, loc: &TensorLoc) -> Result<Vec<u8>> {
+    pub(crate) fn read_raw(&self, loc: &TensorLoc) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; (loc.end - loc.start) as usize];
         self.files[loc.file].read_exact_at(&mut buf, loc.start)?;
         Ok(buf)
     }
 
-    fn read_f32(&self, name: &str) -> Result<(Vec<f32>, Vec<usize>)> {
+    pub(crate) fn read_f32(&self, name: &str) -> Result<(Vec<f32>, Vec<usize>)> {
         let loc = self.tensors.get(name).with_context(|| format!("tensor {name} not found"))?;
         let raw = self.read_raw(loc)?;
         let vals = match loc.dtype.as_str() {
@@ -153,6 +155,18 @@ pub struct ConvertReport {
 }
 
 pub fn convert(model_dir: &Path, out_pack: &Path, out_core: &Path) -> Result<ConvertReport> {
+    // Dispatch on architecture: Kimi K2.x is a multimodal wrapper around a
+    // DeepseekV3 text stack with QAT int4 experts — different tensor names,
+    // repack instead of quantize.
+    {
+        let config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(model_dir.join("config.json")).context("reading config.json")?,
+        )?;
+        if config["model_type"].as_str() == Some("kimi_k25") || !config["text_config"].is_null() {
+            return kimi::convert_kimi(model_dir, out_pack, out_core);
+        }
+    }
+
     let ckpt = Checkpoint::open(model_dir)?;
     let layers = ckpt.config["num_hidden_layers"]
         .as_u64()
@@ -270,13 +284,25 @@ fn build_blob(
 /// Minimal safetensors writer: JSON header + raw data, tensors kept in their
 /// source dtype, copied shard→core via pread.
 fn write_safetensors(ckpt: &Checkpoint, names: &[String], out: &Path) -> Result<u64> {
+    let pairs: Vec<(String, String)> =
+        names.iter().map(|n| (n.clone(), n.clone())).collect();
+    write_safetensors_renamed(ckpt, &pairs, out)
+}
+
+/// Same, but each tensor is written under a new name (used to strip
+/// multimodal wrapper prefixes so runtime names stay uniform).
+pub(crate) fn write_safetensors_renamed(
+    ckpt: &Checkpoint,
+    names: &[(String, String)],
+    out: &Path,
+) -> Result<u64> {
     let mut header = serde_json::Map::new();
     let mut cursor = 0u64;
-    for name in names {
-        let loc = &ckpt.tensors[name];
+    for (src, dst) in names {
+        let loc = &ckpt.tensors[src];
         let len = loc.end - loc.start;
         header.insert(
-            name.clone(),
+            dst.clone(),
             serde_json::json!({
                 "dtype": loc.dtype,
                 "shape": loc.shape,
@@ -295,8 +321,8 @@ fn write_safetensors(ckpt: &Checkpoint, names: &[String], out: &Path) -> Result<
     w.write_all(&(hdr.len() as u64).to_le_bytes())?;
     w.write_all(&hdr)?;
     let mut copied = 0u64;
-    for name in names {
-        let raw = ckpt.read_raw(&ckpt.tensors[name])?;
+    for (src, _) in names {
+        let raw = ckpt.read_raw(&ckpt.tensors[src])?;
         copied += raw.len() as u64;
         w.write_all(&raw)?;
     }
