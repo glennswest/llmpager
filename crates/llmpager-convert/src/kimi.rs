@@ -192,17 +192,13 @@ fn build_kimi_blob(
                     max_scale_err = max_scale_err.max(((s - back) / s).abs());
                 }
             }
-            // Nibbles: word k holds signed values 8k..8k+7, value j of the
-            // word at bits 4j. Ours: byte i holds values 2i (low) 2i+1
-            // (high), stored as value+8.
+            // Nibbles: compressed-tensors stores value+8 (offset binary) in
+            // nibble k of each word at bits 4k — verified against the
+            // official unpack_from_int32. That is exactly our layout
+            // (byte i = values 2i low, 2i+1 high, stored value+8), so the
+            // nibble stream copies through verbatim.
             for (w, c) in packed.chunks_exact(4).enumerate() {
-                let word = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                let out = &mut ddst[w * 4..w * 4 + 4];
-                for i in 0..4 {
-                    let r0 = ((word >> (8 * i)) & 0xF) as u8;
-                    let r1 = ((word >> (8 * i + 4)) & 0xF) as u8;
-                    out[i] = ((r0 + 8) & 0xF) | (((r1 + 8) & 0xF) << 4);
-                }
+                ddst[w * 4..w * 4 + 4].copy_from_slice(c);
             }
         }
         regions.push(buf);
@@ -545,7 +541,9 @@ mod tests {
                 let word =
                     u32::from_le_bytes(packed[vi / 8 * 4..vi / 8 * 4 + 4].try_into().unwrap());
                 let raw = ((word >> (4 * (vi % 8))) & 0xF) as i32;
-                let signed = if raw >= 8 { raw - 16 } else { raw };
+                // Offset binary: stored nibble is value + 8 (matches the
+                // official compressed-tensors unpack).
+                let signed = raw - 8;
                 let sidx = (r_ * (cols / 32) + c / 32) * 2;
                 let scale = bf16_to_f32(u16::from_le_bytes([scales[sidx], scales[sidx + 1]]));
                 let want = signed as f32 * scale;
