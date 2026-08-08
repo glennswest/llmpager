@@ -36,6 +36,18 @@ impl AnyDecoder {
             AnyDecoder::Kimi(d) => &d.cfg.eos,
         }
     }
+    fn chunk_cap(&self) -> usize {
+        match self {
+            AnyDecoder::Qwen(d) => d.chunk_cap(),
+            AnyDecoder::Kimi(d) => d.chunk_cap(),
+        }
+    }
+    fn step_chunk(&mut self, tokens: &[u32], start_pos: usize, want_logits: bool) -> Result<u32> {
+        match self {
+            AnyDecoder::Qwen(d) => d.step_chunk(tokens, start_pos, want_logits),
+            AnyDecoder::Kimi(d) => d.step_chunk(tokens, start_pos, want_logits),
+        }
+    }
 }
 
 fn arg(args: &[String], key: &str) -> Option<String> {
@@ -163,13 +175,22 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Prefill: feed prompt tokens; logits of the last one seed generation.
+    // Prefill in chunks: each layer fetches the union of the chunk's
+    // experts once instead of per token.
     eprintln!("prefill: {} tokens", prompt_ids.len());
     let t0 = Instant::now();
     let mut next = 0u32;
-    for (pos, id) in prompt_ids.iter().enumerate() {
-        let last = pos + 1 == prompt_ids.len();
-        next = dec.step(*id, pos, last)?;
+    let cap = dec.chunk_cap();
+    // --chunk=1 restores per-token prefill (A/B); default = full chunks.
+    let chunk_size = arg(&args, "chunk")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(cap)
+        .clamp(1, cap);
+    let mut pos = 0usize;
+    for chunk in prompt_ids.chunks(chunk_size) {
+        let last = pos + chunk.len() == prompt_ids.len();
+        next = dec.step_chunk(chunk, pos, last)?;
+        pos += chunk.len();
     }
     let prefill_s = t0.elapsed().as_secs_f64();
 

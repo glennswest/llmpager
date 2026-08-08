@@ -403,6 +403,11 @@ pub struct KimiDecoder {
     logits_host: Vec<u8>,
     router_host: Vec<u8>,
     embed_row: Vec<f32>,
+    chunk_cap: usize,
+    h_buf: CUdeviceptr,      // [chunk_cap, hidden]
+    hn_buf: CUdeviceptr,     // [chunk_cap, hidden]
+    router_buf: CUdeviceptr, // [chunk_cap, experts]
+    router_chunk_host: Vec<u8>,
     release_events: Vec<CUevent>,
     pending_release: VecDeque<(usize, Vec<ExpertHandle>)>,
     next_event: usize,
@@ -513,6 +518,11 @@ impl KimiDecoder {
             logits_host: vec![0u8; cfg.vocab * 4],
             router_host: vec![0u8; cfg.experts * 4],
             embed_row: vec![0f32; cfg.hidden],
+            chunk_cap: 64,
+            h_buf: f(64 * cfg.hidden)?,
+            hn_buf: f(64 * cfg.hidden)?,
+            router_buf: f(64 * cfg.experts)?,
+            router_chunk_host: vec![0u8; 64 * cfg.experts * 4],
             release_events: (0..8).map(|_| cuda.event()).collect::<Result<_>>()?,
             pending_release: VecDeque::new(),
             next_event: 0,
@@ -694,6 +704,201 @@ impl KimiDecoder {
         Ok(best)
     }
 
+    pub fn chunk_cap(&self) -> usize {
+        self.chunk_cap
+    }
+
+    /// Union prefill (see decode.rs): attention token-by-token, each MoE
+    /// layer's routed experts fetched once as the chunk union, in waves.
+    /// The shared expert and dense layers are per-token as in step().
+    pub fn step_chunk(
+        &mut self,
+        tokens: &[u32],
+        start_pos: usize,
+        want_logits: bool,
+    ) -> Result<u32> {
+        let n = tokens.len();
+        if n == 0 || n > self.chunk_cap {
+            bail!("chunk of {n} tokens (cap {})", self.chunk_cap);
+        }
+        if start_pos + n > self.max_seq {
+            bail!("chunk exceeds max_seq {}", self.max_seq);
+        }
+        let c = self.cfg.clone();
+        let cu = Arc::clone(&self.cuda);
+        let cu = &*cu;
+        let ke = self.kernels;
+        let ke = &ke;
+        let st = self.stream;
+        let hid = c.hidden as i32;
+        let heads = c.heads as i32;
+        let qk = (c.kv_lora + c.rope) as i32;
+        let q_dim = (c.nope + c.rope) as i32;
+        let h_at = |b: CUdeviceptr, t: usize| b + (t * c.hidden * 4) as u64;
+
+        for (t, tok) in tokens.iter().enumerate() {
+            let row = &self.core.embed_host
+                [*tok as usize * c.hidden * 2..(*tok as usize + 1) * c.hidden * 2];
+            for (i, ch) in row.chunks_exact(2).enumerate() {
+                self.embed_row[i] = bf16_to_f32(u16::from_le_bytes([ch[0], ch[1]]));
+            }
+            cu.htod_async(h_at(self.h_buf, t), f32_bytes(&self.embed_row), st)?;
+            cu.sync_stream(st)?; // embed_row is reused next iteration
+        }
+
+        let wave = ((self.pager.as_ref().unwrap().slots_per_layer() as usize) / 2)
+            .max(c.top_k)
+            .min(self.chunk_cap * c.top_k);
+
+        for l in 0..c.layers {
+            let w = &self.core.layers[l];
+
+            for t in 0..n {
+                let pos = start_pos + t;
+                let ht = h_at(self.h_buf, t);
+                ke.rmsnorm(cu, ht, w.input_ln, self.h_norm, 1, hid, c.rms_eps, st)?;
+                mat_gemv(ke, cu, &w.q_a, self.h_norm, self.qa, st)?;
+                ke.rmsnorm(cu, self.qa, w.q_a_ln, self.qa, 1, c.q_lora as i32, c.rms_eps, st)?;
+                mat_gemv(ke, cu, &w.q_b, self.qa, self.q, st)?;
+                mat_gemv(ke, cu, &w.kv_a, self.h_norm, self.kva, st)?;
+                ke.rmsnorm(cu, self.kva, w.kv_a_ln, self.ckv_norm, 1, c.kv_lora as i32, c.rms_eps, st)?;
+                ke.mla_rope(
+                    cu, self.q, heads, q_dim, c.nope as i32, (c.rope / 2) as i32,
+                    pos as i32, self.inv_freq_dev, 1.0, st,
+                )?;
+                ke.mla_rope(
+                    cu, self.kva, 1, qk, c.kv_lora as i32, (c.rope / 2) as i32,
+                    pos as i32, self.inv_freq_dev, 1.0, st,
+                )?;
+                ke.strided_copy(
+                    cu, self.ckv_norm, c.kv_lora as i32, 0,
+                    self.cache[l], qk, (pos as i32) * qk, 1, c.kv_lora as i32, st,
+                )?;
+                ke.strided_copy(
+                    cu, self.kva, qk, c.kv_lora as i32,
+                    self.cache[l], qk, (pos as i32) * qk + c.kv_lora as i32, 1, c.rope as i32, st,
+                )?;
+                ke.bf16_gemv_batch(
+                    cu, w.kt, (c.kv_lora * c.nope) as u64,
+                    self.q, q_dim, self.q_full, qk,
+                    c.kv_lora as i32, c.nope as i32, heads, st,
+                )?;
+                ke.strided_copy(
+                    cu, self.q, q_dim, c.nope as i32,
+                    self.q_full, qk, c.kv_lora as i32, heads, c.rope as i32, st,
+                )?;
+                ke.mla_attn_decode(
+                    cu, self.q_full, self.cache[l], self.ctx, self.attn_scratch,
+                    heads, qk, c.kv_lora as i32,
+                    (pos + 1) as i32, self.max_seq as i32, c.softmax_scale, st,
+                )?;
+                ke.bf16_gemv_batch(
+                    cu, w.vw, (c.v_head * c.kv_lora) as u64,
+                    self.ctx, c.kv_lora as i32, self.attn_pre, c.v_head as i32,
+                    c.v_head as i32, c.kv_lora as i32, heads, st,
+                )?;
+                mat_gemv(ke, cu, &w.o, self.attn_pre, self.proj_out, st)?;
+                ke.add(cu, ht, self.proj_out, hid, st)?;
+                ke.rmsnorm(cu, ht, w.post_ln, h_at(self.hn_buf, t), 1, hid, c.rms_eps, st)?;
+            }
+
+            if let Some(dense) = &w.dense {
+                for t in 0..n {
+                    let x = h_at(self.hn_buf, t);
+                    mat_gemv(ke, cu, &dense[0], x, self.dn_gate, st)?;
+                    mat_gemv(ke, cu, &dense[1], x, self.dn_up, st)?;
+                    ke.silu_mul(cu, self.dn_gate, self.dn_up, self.dn_gate, c.dense_inter as i32, st)?;
+                    mat_gemv(ke, cu, &dense[2], self.dn_gate, self.proj_out, st)?;
+                    ke.add(cu, h_at(self.h_buf, t), self.proj_out, hid, st)?;
+                }
+                continue;
+            }
+
+            // Shared expert + router logits per token.
+            let sh = w.shared.as_ref().unwrap();
+            let router = w.router.as_ref().unwrap();
+            for t in 0..n {
+                let x = h_at(self.hn_buf, t);
+                mat_gemv(ke, cu, &sh[0], x, self.sh_gate, st)?;
+                mat_gemv(ke, cu, &sh[1], x, self.sh_up, st)?;
+                ke.silu_mul(cu, self.sh_gate, self.sh_up, self.sh_gate, c.moe_inter as i32, st)?;
+                mat_gemv(ke, cu, &sh[2], self.sh_gate, self.sh_out, st)?;
+                ke.add(cu, h_at(self.h_buf, t), self.sh_out, hid, st)?;
+                mat_gemv(ke, cu, router, x, self.router_buf + (t * c.experts * 4) as u64, st)?;
+            }
+            let span = n * c.experts * 4;
+            cu.dtoh_async(&mut self.router_chunk_host[..span], self.router_buf, st)?;
+            cu.sync_stream(st)?;
+            let all = f32_from_le(&self.router_chunk_host[..span]);
+            let bias = w.router_bias.as_ref().unwrap();
+            let picks: Vec<Vec<(u16, f32)>> = (0..n)
+                .map(|t| {
+                    sigmoid_topk(
+                        &all[t * c.experts..(t + 1) * c.experts],
+                        bias,
+                        c.top_k,
+                        c.norm_topk_prob,
+                        c.routed_scaling,
+                        self.min_expert_weight,
+                    )
+                })
+                .collect();
+            let mut union: Vec<u16> = picks.iter().flatten().map(|p| p.0).collect();
+            union.sort_unstable();
+            union.dedup();
+
+            let pack_layer = (l - c.dense_layers) as u16;
+            for wave_ids in union.chunks(wave) {
+                let handles = self.pager.as_ref().unwrap().request(pack_layer, wave_ids)?;
+                for h in &handles {
+                    self.pager.as_ref().unwrap().wait_stream(h, st)?;
+                }
+                let dev_of = |id: u16| {
+                    handles.iter().find(|h| h.expert == id).map(|h| h.dev).unwrap()
+                };
+                let inter = c.moe_inter as i32;
+                for t in 0..n {
+                    let sub: Vec<&(u16, f32)> =
+                        picks[t].iter().filter(|p| wave_ids.contains(&p.0)).collect();
+                    if sub.is_empty() {
+                        continue;
+                    }
+                    let e = sub.len() as i32;
+                    let ptrs: Vec<u8> =
+                        sub.iter().flat_map(|p| dev_of(p.0).to_le_bytes()).collect();
+                    let wts: Vec<u8> = sub.iter().flat_map(|p| p.1.to_le_bytes()).collect();
+                    cu.htod_async(self.d_expert_ptrs, &ptrs, st)?;
+                    cu.htod_async(self.d_expert_wts, &wts, st)?;
+                    let x = h_at(self.hn_buf, t);
+                    ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.gate_off, x, 0, self.gate_out, inter, hid, self.expert_group, e, st)?;
+                    ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.up_off, x, 0, self.up_out, inter, hid, self.expert_group, e, st)?;
+                    ke.silu_mul(cu, self.gate_out, self.up_out, self.act_out, e * inter, st)?;
+                    ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, self.expert_group, e, st)?;
+                    ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, h_at(self.h_buf, t), e, hid, st)?;
+                }
+                self.defer_release(handles)?;
+            }
+        }
+
+        if !want_logits {
+            return Ok(0);
+        }
+        let last = h_at(self.h_buf, n - 1);
+        ke.rmsnorm(cu, last, self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
+        mat_gemv(ke, cu, &self.core.lm_head, self.h_norm, self.logits, st)?;
+        cu.dtoh_async(&mut self.logits_host, self.logits, st)?;
+        cu.sync_stream(st)?;
+        let logits = f32_from_le(&self.logits_host);
+        let (mut best, mut bestv) = (0u32, f32::MIN);
+        for (i, v) in logits.iter().enumerate() {
+            if *v > bestv {
+                bestv = *v;
+                best = i as u32;
+            }
+        }
+        Ok(best)
+    }
+
     pub fn pager_metrics(&self) -> llmpager_cuda::pager::Metrics {
         self.pager.as_ref().unwrap().metrics()
     }
@@ -778,6 +983,7 @@ impl Drop for KimiDecoder {
             self.gate_out, self.up_out, self.act_out, self.expert_out,
             self.d_expert_ptrs, self.d_expert_wts, self.sh_gate, self.sh_up,
             self.sh_out, self.dn_gate, self.dn_up, self.logits,
+            self.h_buf, self.hn_buf, self.router_buf,
         ];
         ptrs.extend(&self.cache);
         ptrs.extend(self.core.device_ptrs());

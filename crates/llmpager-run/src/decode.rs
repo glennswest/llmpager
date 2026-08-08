@@ -77,6 +77,12 @@ pub struct Decoder {
     down_off: u64,
     /// q4 group size of the expert pack (64 native, 32 repacked QAT).
     expert_group: i32,
+    // Chunked-prefill buffers: whole-chunk hidden states + router logits.
+    chunk_cap: usize,
+    h_buf: CUdeviceptr,      // [chunk_cap, hidden]
+    hn_buf: CUdeviceptr,     // [chunk_cap, hidden]
+    router_buf: CUdeviceptr, // [chunk_cap, experts]
+    router_chunk_host: Vec<u8>,
     logits_host: Vec<u8>,
     router_host: Vec<u8>,
     // Deferred expert-handle release: handles stay pinned until the compute
@@ -135,6 +141,7 @@ impl Decoder {
 
         let gate_bytes =
             llmpager_core::quant::q4_bytes(cfg.moe_inter, cfg.hidden, expert_group as usize) as u64;
+        let chunk_cap = 64usize;
         Ok(Self {
             h: f(cfg.hidden)?,
             h_norm: f(cfg.hidden)?,
@@ -158,6 +165,11 @@ impl Decoder {
             up_off: 32 + gate_bytes,
             down_off: 32 + 2 * gate_bytes,
             expert_group,
+            chunk_cap,
+            h_buf: f(chunk_cap * cfg.hidden)?,
+            hn_buf: f(chunk_cap * cfg.hidden)?,
+            router_buf: f(chunk_cap * cfg.experts)?,
+            router_chunk_host: vec![0u8; chunk_cap * cfg.experts * 4],
             logits_host: vec![0u8; cfg.vocab * 4],
             router_host: vec![0u8; cfg.experts * 4],
             release_events: (0..8).map(|_| cuda.event()).collect::<Result<_>>()?,
@@ -304,6 +316,159 @@ impl Decoder {
         Ok(best)
     }
 
+    /// Union prefill: run `tokens` (≤ chunk_cap) through all layers as one
+    /// chunk. Attention stays token-by-token (causal), but each layer's
+    /// routed experts are fetched once as the union over the whole chunk,
+    /// in waves small enough to never pin the entire cache. Returns the
+    /// greedy argmax of the last token when `want_logits`.
+    pub fn step_chunk(
+        &mut self,
+        tokens: &[u32],
+        start_pos: usize,
+        want_logits: bool,
+    ) -> Result<u32> {
+        let n = tokens.len();
+        if n == 0 || n > self.chunk_cap {
+            bail!("chunk of {n} tokens (cap {})", self.chunk_cap);
+        }
+        if start_pos + n > self.max_seq {
+            bail!("chunk exceeds max_seq {}", self.max_seq);
+        }
+        let c = self.cfg.clone();
+        let cu = Arc::clone(&self.cuda);
+        let cu = &*cu;
+        let ke = self.kernels;
+        let ke = &ke;
+        let st = self.stream;
+        let hid = c.hidden as i32;
+        let h_at = |b: CUdeviceptr, t: usize| b + (t * c.hidden * 4) as u64;
+
+        for (t, tok) in tokens.iter().enumerate() {
+            ke.bf16_row(cu, self.core.embed, *tok as i32, hid, h_at(self.h_buf, t), st)?;
+        }
+
+        let wave = ((self.pager.as_ref().unwrap().slots_per_layer() as usize) / 2)
+            .max(c.top_k)
+            .min(self.chunk_cap * c.top_k);
+
+        for l in 0..c.layers {
+            let w = &self.core.layers[l];
+
+            // Attention, causally in order; KV appended before later tokens
+            // attend, so within-chunk attention sees the whole prefix.
+            for t in 0..n {
+                let pos = start_pos + t;
+                let ht = h_at(self.h_buf, t);
+                ke.rmsnorm(cu, ht, w.input_ln, self.h_norm, 1, hid, c.rms_eps, st)?;
+                mat_gemv(ke, cu, &w.q, self.h_norm, self.q, st)?;
+                mat_gemv(ke, cu, &w.k, self.h_norm, self.k, st)?;
+                mat_gemv(ke, cu, &w.v, self.h_norm, self.v, st)?;
+                ke.rmsnorm(cu, self.q, w.q_norm, self.q, c.heads as i32, c.head_dim as i32, c.rms_eps, st)?;
+                ke.rmsnorm(cu, self.k, w.k_norm, self.k, c.kv_heads as i32, c.head_dim as i32, c.rms_eps, st)?;
+                ke.rope(cu, self.q, c.heads as i32, c.head_dim as i32, pos as i32, c.rope_theta, st)?;
+                ke.rope(cu, self.k, c.kv_heads as i32, c.head_dim as i32, pos as i32, c.rope_theta, st)?;
+                ke.kv_append(
+                    cu, self.k, self.v, self.kcache[l], self.vcache[l],
+                    c.kv_heads as i32, c.head_dim as i32, pos as i32, self.max_seq as i32, st,
+                )?;
+                ke.attn_decode(
+                    cu, self.q, self.kcache[l], self.vcache[l], self.attn_out, self.attn_scratch,
+                    c.heads as i32, c.kv_heads as i32, c.head_dim as i32,
+                    (pos + 1) as i32, self.max_seq as i32,
+                    1.0 / (c.head_dim as f32).sqrt(), st,
+                )?;
+                mat_gemv(ke, cu, &w.o, self.attn_out, self.proj_out, st)?;
+                ke.add(cu, ht, self.proj_out, hid, st)?;
+                // Post-norm now, straight into the chunk buffer the router
+                // and expert GEMVs read from.
+                ke.rmsnorm(cu, ht, w.post_ln, h_at(self.hn_buf, t), 1, hid, c.rms_eps, st)?;
+                mat_gemv(
+                    ke, cu, &w.router, h_at(self.hn_buf, t),
+                    self.router_buf + (t * c.experts * 4) as u64, st,
+                )?;
+            }
+
+            // Whole-chunk routing on the host.
+            let span = n * c.experts * 4;
+            cu.dtoh_async(&mut self.router_chunk_host[..span], self.router_buf, st)?;
+            cu.sync_stream(st)?;
+            let all = f32_from_le(&self.router_chunk_host[..span]);
+            let picks: Vec<Vec<(u16, f32)>> = (0..n)
+                .map(|t| {
+                    top_k_softmax(
+                        &all[t * c.experts..(t + 1) * c.experts],
+                        c.top_k,
+                        c.norm_topk_prob,
+                    )
+                })
+                .collect();
+            let mut union: Vec<u16> = picks.iter().flatten().map(|p| p.0).collect();
+            union.sort_unstable();
+            union.dedup();
+
+            // Fetch the union in waves; every expert is read at most once
+            // per chunk regardless of how many tokens routed to it.
+            for wave_ids in union.chunks(wave) {
+                let handles = self.pager.as_ref().unwrap().request(l as u16, wave_ids)?;
+                for h in &handles {
+                    self.pager.as_ref().unwrap().wait_stream(h, st)?;
+                }
+                let dev_of = |id: u16| {
+                    handles
+                        .iter()
+                        .find(|h| h.expert == id)
+                        .map(|h| h.dev)
+                        .unwrap()
+                };
+                let inter = c.moe_inter as i32;
+                for t in 0..n {
+                    let sub: Vec<&(u16, f32)> = picks[t]
+                        .iter()
+                        .filter(|p| wave_ids.contains(&p.0))
+                        .collect();
+                    if sub.is_empty() {
+                        continue;
+                    }
+                    let e = sub.len() as i32;
+                    let ptrs: Vec<u8> =
+                        sub.iter().flat_map(|p| dev_of(p.0).to_le_bytes()).collect();
+                    let wts: Vec<u8> = sub.iter().flat_map(|p| p.1.to_le_bytes()).collect();
+                    cu.htod_async(self.d_expert_ptrs, &ptrs, st)?;
+                    cu.htod_async(self.d_expert_wts, &wts, st)?;
+                    let x = h_at(self.hn_buf, t);
+                    ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.gate_off, x, 0, self.gate_out, inter, hid, self.expert_group, e, st)?;
+                    ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.up_off, x, 0, self.up_out, inter, hid, self.expert_group, e, st)?;
+                    ke.silu_mul(cu, self.gate_out, self.up_out, self.act_out, e * inter, st)?;
+                    ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, self.expert_group, e, st)?;
+                    ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, h_at(self.h_buf, t), e, hid, st)?;
+                }
+                self.defer_release(handles)?;
+            }
+        }
+
+        if !want_logits {
+            return Ok(0);
+        }
+        let last = h_at(self.h_buf, n - 1);
+        ke.rmsnorm(cu, last, self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
+        mat_gemv(ke, cu, &self.core.lm_head, self.h_norm, self.logits, st)?;
+        cu.dtoh_async(&mut self.logits_host, self.logits, st)?;
+        cu.sync_stream(st)?;
+        let logits = f32_from_le(&self.logits_host);
+        let (mut best, mut bestv) = (0u32, f32::MIN);
+        for (i, v) in logits.iter().enumerate() {
+            if *v > bestv {
+                bestv = *v;
+                best = i as u32;
+            }
+        }
+        Ok(best)
+    }
+
+    pub fn chunk_cap(&self) -> usize {
+        self.chunk_cap
+    }
+
     pub fn pager_metrics(&self) -> llmpager_cuda::pager::Metrics {
         self.pager.as_ref().unwrap().metrics()
     }
@@ -385,6 +550,7 @@ impl Drop for Decoder {
             self.proj_out, self.router_logits, self.gate_out, self.up_out,
             self.act_out, self.expert_out, self.d_expert_ptrs,
             self.d_expert_wts, self.logits, self.attn_scratch,
+            self.h_buf, self.hn_buf, self.router_buf,
         ];
         ptrs.extend(&self.kcache);
         ptrs.extend(&self.vcache);

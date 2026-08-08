@@ -262,6 +262,10 @@ impl Pager {
         self.shared.cv.notify_all();
     }
 
+    pub fn slots_per_layer(&self) -> u32 {
+        self.shared.slots_per_layer
+    }
+
     pub fn metrics(&self) -> Metrics {
         let st = self.shared.state.lock().unwrap();
         let (hits, misses) = st.cache.stats();
