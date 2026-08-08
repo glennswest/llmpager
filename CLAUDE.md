@@ -178,8 +178,9 @@ Approved 2026-08-08: items 1-5.
       im_user/im_middle chat template (matches checkpoint jinja);
       deployed live, sampled haiku verified via API.
 - [ ] 4. Batched decode — staged plan:
-      (a) [x] f16 KV cache (default; LLMPAGER_KV_F32=1 reverts) — kernels
-          verified on GPU (9.3e-5 vs f32); PPL gate vs f32 in flight,
+      (a) [x] f16 KV cache (default; LLMPAGER_KV_F32=1 reverts) — PPL
+          12.9575 (f32) vs 12.9671 (f16), +0.07% = noise; and +14%
+          decode (26.9 -> 30.6 tok/s teacher-forced, less cache BW),
       (b) step_multi(entries: (token, pos, seq_slot)) — step_chunk's
           union machinery with per-slot KV caches and per-entry seq_len
           in attention (grid.y = entry),

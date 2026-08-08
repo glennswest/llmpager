@@ -204,3 +204,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 ### 2026-08-08
 - **feat:** v0.12.0 items shipped (union prefill, sampling, kimi serving) — see release notes
 - **feat:** f16 KV cache default (halves KV VRAM; batch-decode enabler); GPU-verified, PPL gate pending
+- **feat:** f16 KV validated: PPL +0.07% (noise) and +14% faster; stays default
