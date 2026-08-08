@@ -134,7 +134,8 @@ impl Decoder {
         let f = |n: usize| cuda.alloc_device(n * 4);
         let qkv = cfg.heads * cfg.head_dim;
         let kvd = cfg.kv_heads * cfg.head_dim;
-        let kv_f16 = true;
+        // f16 KV default; LLMPAGER_KV_F32=1 restores f32 (A/B, debugging).
+        let kv_f16 = std::env::var("LLMPAGER_KV_F32").is_err();
         let kv_bytes = cfg.kv_heads * max_seq * cfg.head_dim * if kv_f16 { 2 } else { 4 };
         let mut kcache = Vec::with_capacity(cfg.layers);
         let mut vcache = Vec::with_capacity(cfg.layers);
