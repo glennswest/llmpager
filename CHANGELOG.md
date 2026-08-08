@@ -205,3 +205,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **feat:** v0.12.0 items shipped (union prefill, sampling, kimi serving) — see release notes
 - **feat:** f16 KV cache default (halves KV VRAM; batch-decode enabler); GPU-verified, PPL gate pending
 - **feat:** f16 KV validated: PPL +0.07% (noise) and +14% faster; stays default
+- **docs:** M8 milestone — data density & memory organization plan (RAM tier, global slot pool, f16 MLA state, fp8 core A/B, entropy-coded pack, phase split, cold tier)

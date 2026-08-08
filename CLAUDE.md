@@ -188,6 +188,39 @@ Approved 2026-08-08: items 1-5.
 - [ ] 5. Remaining smalls: GPU router top-k; expert-usage profiling +
       RAM pre-warm (Kimi especially).
 
+### M8 — Data density & memory organization (planned 2026-08-08)
+Deep-dive conclusions; ranked. Items 1-3 are no-quality-risk memory
+reorganization; 4 is a measured quality/VRAM trade; 5-7 are further out.
+Already optimal, do not touch: bit-exact int4 QAT repack, 4096-aligned
+blobs, layer-major pack ordering (union prefill reads a layer as one
+near-sequential ~9.6GB sweep), uniform blob size (no slot fragmentation).
+- [ ] 1. Managed RAM tier (biggest win): Kimi's 600GB pack >> 128GB RAM,
+      so O_DIRECT leaves it with NO RAM cache today. Add an explicit
+      middle tier in the pager: ~100GB pinned host LFU (~4,100 experts,
+      17% of 23K) with frequency-based admission/eviction; RAM hit =
+      ~1-2ms pinned H2D vs ~4-6ms disk read. Expected combined VRAM+RAM
+      hit 40-70% under routing skew => plausibly 2-3x Kimi decode.
+- [ ] 2. Global VRAM slot pool: replace per-layer slot arrays with one
+      aged-LFU pool keyed (layer, expert) — uniform blob size means any
+      slot fits any expert; layers with high routing entropy naturally
+      claim more slots. Same VRAM, higher hit rate. ExpertCache refactor.
+- [ ] 3. f16 for Kimi attention state: MLA cache rows f32 -> f16
+      (2.3KB -> 1.15KB/token; 256K ctx: 590 -> 295MB/seq) and absorbed
+      kv_b (kt/vw) bf16 -> f16/fp8 (~0.5GB VRAM back to expert slots).
+      Qwen f16-KV gate already passed (+0.07% PPL, +14% speed).
+- [ ] 4. fp8 core A/B (needs real-model PPL baseline): attention core at
+      fp8 (~6.7GB, native on Blackwell) vs q4g64 (~3.4GB) vs bf16
+      (13.4GB, doesn't fit). Per-tensor choice — attention fp8 +
+      shared/dense q4 is the likely sweet spot. Requires fp8 GEMV kernel.
+- [ ] 5. Entropy-coded pack (ANS/GDeflate-class) + GPU decompression
+      stage: QAT int4 nibbles are non-uniform; 10-20% smaller pack =
+      10-20% fetch bandwidth = direct tok/s (disk-bound). High
+      complexity; needs a decompress kernel between pinned and slot.
+- [ ] 6. Blob phase split (gate+up | down): stream each expert in two
+      phases, halving staging footprint and overlapping finer. Small win.
+- [ ] 7. Cold-expert lower-bit tier (int3 for rarely-routed experts):
+      only behind a PPL gate — breaks the QAT guarantee; last resort.
+
 ## Session Log
 
 - 2026-08-06 (evening): M3 continued — RAM tier (`--direct=0`, biggest
