@@ -220,6 +220,10 @@ near-sequential ~9.6GB sweep), uniform blob size (no slot fragmentation).
       phases, halving staging footprint and overlapping finer. Small win.
 - [ ] 7. Cold-expert lower-bit tier (int3 for rarely-routed experts):
       only behind a PPL gate — breaks the QAT guarantee; last resort.
+- [ ] 8. Core allocation packing: Kimi core load makes ~700 cuMemAllocs
+      (norms etc. round up to ~2MB granularity => ~1-1.5GB waste; caused
+      first-run OOM at slots=4). Pack per-layer weights into one arena
+      alloc each, like the pager slot arenas.
 
 ## Session Log
 

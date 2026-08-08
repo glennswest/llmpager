@@ -206,3 +206,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **feat:** f16 KV cache default (halves KV VRAM; batch-decode enabler); GPU-verified, PPL gate pending
 - **feat:** f16 KV validated: PPL +0.07% (noise) and +14% faster; stays default
 - **docs:** M8 milestone — data density & memory organization plan (RAM tier, global slot pool, f16 MLA state, fp8 core A/B, entropy-coded pack, phase split, cold tier)
+- **feat:** Kimi K2.6 pack + core converted on ai.g8.lo (570.9GB pack, 23.4GB core, 20min); tokenizer.json built from tiktoken via TikTokenConverter with special-id patch (config vs tokenizer mismatch on im_middle found and fixed); byte-exact vs reference
