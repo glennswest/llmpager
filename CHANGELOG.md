@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.14.0] — 2026-08-08
+
+### Added
+- Managed host-RAM expert tier (M8-1): NORESERVE mapping + global-pool
+  LFU, read-through io workers, write-allocate; --ram-gb CLI and
+  per-model serve config. Kimi first run: 0.35 -> 0.57 tok/s (+63%),
+  tier still cold
+- Per-model max_seq in serve config; ram-tier hit metrics
+- Kimi milestone presentation (kimi.html, 15 slides + narration +
+  gmedia config)
+
 ## [v0.13.0] — 2026-08-08
 
 **Kimi K2.6 (1T / 32B active) runs on the 16GB GPU.** First coherent
