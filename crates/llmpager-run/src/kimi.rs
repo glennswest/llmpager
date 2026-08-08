@@ -557,6 +557,21 @@ impl KimiDecoder {
         Ok(())
     }
 
+    /// LLMPAGER_DEBUG=1: print staged layer-0 probes for the first token,
+    /// formatted to diff against tools' ref_layer0.py CPU reference.
+    fn dbg_probe(&self, name: &str, dev: CUdeviceptr, n: usize) {
+        if std::env::var("LLMPAGER_DEBUG").is_err() {
+            return;
+        }
+        let mut raw = vec![0u8; n * 4];
+        let _ = self.cuda.dtoh_async(&mut raw, dev, self.stream);
+        let _ = self.cuda.sync_stream(self.stream);
+        let v = f32_from_le(&raw);
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let head: Vec<f32> = v.iter().take(6).map(|x| (x * 1e5).round() / 1e5).collect();
+        eprintln!("{name}: {head:?} norm={norm:.5}");
+    }
+
     pub fn step(&mut self, token: u32, pos: usize, want_logits: bool) -> Result<u32> {
         if pos >= self.max_seq {
             bail!("position {pos} exceeds max_seq {}", self.max_seq);
@@ -579,17 +594,37 @@ impl KimiDecoder {
             self.embed_row[i] = bf16_to_f32(u16::from_le_bytes([ch[0], ch[1]]));
         }
         cu.htod_async(self.h, f32_bytes(&self.embed_row), st)?;
+        let dbg = pos == 0 && std::env::var("LLMPAGER_DEBUG").is_ok();
+        if dbg {
+            self.dbg_probe("embed", self.h, c.hidden);
+        }
 
         for l in 0..c.layers {
             let w = &self.core.layers[l];
+            let dbg0 = dbg && l == 0;
 
             // MLA attention.
             ke.rmsnorm(cu, self.h, w.input_ln, self.h_norm, 1, hid, c.rms_eps, st)?;
+            if dbg0 {
+                self.dbg_probe("hn", self.h_norm, c.hidden);
+            }
             mat_gemv(ke, cu, &w.q_a, self.h_norm, self.qa, st)?;
+            if dbg0 {
+                self.dbg_probe("qa", self.qa, c.q_lora);
+            }
             ke.rmsnorm(cu, self.qa, w.q_a_ln, self.qa, 1, c.q_lora as i32, c.rms_eps, st)?;
             mat_gemv(ke, cu, &w.q_b, self.qa, self.q, st)?;
+            if dbg0 {
+                self.dbg_probe("q_head0", self.q, c.nope + c.rope);
+            }
             mat_gemv(ke, cu, &w.kv_a, self.h_norm, self.kva, st)?;
+            if dbg0 {
+                self.dbg_probe("kva", self.kva, c.kv_lora + c.rope);
+            }
             ke.rmsnorm(cu, self.kva, w.kv_a_ln, self.ckv_norm, 1, c.kv_lora as i32, c.rms_eps, st)?;
+            if dbg0 {
+                self.dbg_probe("cn", self.ckv_norm, c.kv_lora);
+            }
             // RoPE on q rope slices and the shared k_rope.
             ke.mla_rope(
                 cu, self.q, heads, q_dim, c.nope as i32, (c.rope / 2) as i32,
@@ -629,8 +664,14 @@ impl KimiDecoder {
                 self.ctx, c.kv_lora as i32, self.attn_pre, c.v_head as i32,
                 c.v_head as i32, c.kv_lora as i32, heads, st,
             )?;
+            if dbg0 {
+                self.dbg_probe("attn_pre", self.attn_pre, c.heads * c.v_head);
+            }
             mat_gemv(ke, cu, &w.o, self.attn_pre, self.proj_out, st)?;
             ke.add(cu, self.h, self.proj_out, hid, st)?;
+            if dbg0 {
+                self.dbg_probe("h_after_attn", self.h, c.hidden);
+            }
 
             // MLP.
             ke.rmsnorm(cu, self.h, w.post_ln, self.h_norm, 1, hid, c.rms_eps, st)?;
@@ -640,6 +681,9 @@ impl KimiDecoder {
                 ke.silu_mul(cu, self.dn_gate, self.dn_up, self.dn_gate, c.dense_inter as i32, st)?;
                 mat_gemv(ke, cu, &dense[2], self.dn_gate, self.proj_out, st)?;
                 ke.add(cu, self.h, self.proj_out, hid, st)?;
+                if dbg0 {
+                    self.dbg_probe("h_after_l0", self.h, c.hidden);
+                }
                 continue;
             }
 
