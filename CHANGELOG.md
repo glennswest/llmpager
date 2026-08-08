@@ -200,3 +200,7 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **feat:** group-parametric q4 (quant fns + GPU kernels + decoder dtype q4g32-gud); g32 verified on GPU at Kimi expert shape (192.5 GB/s); Kimi K2.6 tensor naming + quant scope confirmed from index
 - **feat:** Kimi converter — kimi_k25 auto-detect, compressed-tensors int4 g32 bit-exact repack (I32 words -> our nibble layout, bf16->f16 scales), core renamed sans language_model. prefix, vision tower dropped, moe_layer_offset for the dense first layer; round-trip unit test
 - **feat:** Kimi runtime complete — MLA kernels (GPU-verified), KimiDecoder (absorbed decode, sigmoid+bias router, shared expert, dense layer, YaRN), AnyDecoder CLI dispatch, synthetic end-to-end GPU smoke (deterministic, cache-size invariant)
+
+### 2026-08-08
+- **feat:** v0.12.0 items shipped (union prefill, sampling, kimi serving) — see release notes
+- **feat:** f16 KV cache default (halves KV VRAM; batch-decode enabler); GPU-verified, PPL gate pending
