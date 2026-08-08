@@ -166,23 +166,25 @@ weight_scale), 1.1TB — repack, don't requantize.
       usable prompt processing at Kimi scale
 
 ### M7 — Throughput & serving quality (in progress)
-Approved 2026-08-08: items 1-5, in order.
-- [ ] 1. Union prefill: `step_chunk(tokens, start_pos)` in both decoders —
-      per layer: attention token-by-token (causal), router for the whole
-      chunk, then experts fetched as the chunk's per-layer union in waves
-      (wave ≤ slots/2 to avoid pin deadlock; moe_reduce accumulates
-      across waves). CLI/serve prefill switches to chunks (default 64).
-      Measure Qwen prefill before/after; Kimi needs this to be usable.
-- [ ] 2. Sampling: temperature / top-p / top-k / repetition penalty in
-      the serve layer + CLI (--temp etc.); greedy stays default for
-      benchmarks/ppl.
-- [ ] 3. Kimi in llmpager-serve: AnyDecoder in the registry, Kimi chat
-      template (kimi_k25 ChatML variant from tokenizer_config), synthetic-
-      pack test; ready for the real pack when the watcher converts it.
-- [ ] 4. Batched decode: N sequences share expert fetches per layer
-      (same wave machinery as union prefill applied at decode time).
-- [ ] 5. Smaller: f16 KV (+ longer max_seq), GPU router top-k (drop
-      per-layer host syncs), expert-usage profiling + RAM pre-warm.
+Approved 2026-08-08: items 1-5.
+- [x] 1. Union prefill (v0.12.0): step_chunk in both decoders; waves with
+      eager release (deferred release deadlocked — fixed). Measured on
+      Qwen3-30B, 1215-tok prompt, O_DIRECT under download contention:
+      71.9s → 47.2s prefill, 166 → 108GB streamed; chunk union averaged
+      ~46 of 128 experts/layer. CLI --chunk=1 for A/B.
+- [x] 2. Sampling (v0.12.0): temp/top-p/top-k/repetition penalty/seed,
+      CLI + serve request fields; greedy default; 5 unit tests.
+- [x] 3. Kimi serving (v0.12.0): AnyDecoder registry (auto-detect),
+      im_user/im_middle chat template (matches checkpoint jinja);
+      deployed live, sampled haiku verified via API.
+- [ ] 4. Batched decode — staged plan:
+      (a) f16 KV cache first (halves KV so a 4-8 batch fits VRAM),
+      (b) step_multi(entries: (token, pos, seq_slot)) — step_chunk's
+          union machinery with per-slot KV caches and per-entry seq_len
+          in attention (grid.y = entry),
+      (c) serve: OpenAI prompt-array / n>1 requests decode in lockstep.
+- [ ] 5. Remaining smalls: GPU router top-k; expert-usage profiling +
+      RAM pre-warm (Kimi especially).
 
 ## Session Log
 
