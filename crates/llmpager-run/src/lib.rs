@@ -4,3 +4,4 @@
 pub mod decode;
 pub mod kimi;
 pub mod model;
+pub mod sample;

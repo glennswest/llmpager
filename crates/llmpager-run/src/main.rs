@@ -194,6 +194,21 @@ fn main() -> Result<()> {
     }
     let prefill_s = t0.elapsed().as_secs_f64();
 
+    // Sampling: greedy unless --temp given.
+    let sampling = llmpager_run::sample::Sampling {
+        temperature: arg(&args, "temp").and_then(|v| v.parse().ok()).unwrap_or(0.0),
+        top_p: arg(&args, "top-p").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+        top_k: arg(&args, "top-k").and_then(|v| v.parse().ok()).unwrap_or(0),
+        repeat_penalty: arg(&args, "repeat-penalty").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+        ..Default::default()
+    };
+    let mut rng = llmpager_run::sample::SampleRng::new(
+        arg(&args, "seed").and_then(|v| v.parse().ok()).unwrap_or(0x5eed),
+    );
+    if !sampling.is_greedy() || sampling.repeat_penalty != 1.0 {
+        next = llmpager_run::sample::sample(&dec.last_logits(), &[], &sampling, &mut rng);
+    }
+
     let mut generated: Vec<u32> = Vec::new();
     let mut printed = String::new();
     let t1 = Instant::now();
@@ -215,7 +230,12 @@ fn main() -> Result<()> {
         if pos >= max_seq {
             break;
         }
-        next = dec.step(next, pos, true)?;
+        let greedy = dec.step(next, pos, true)?;
+        next = if sampling.is_greedy() && sampling.repeat_penalty == 1.0 {
+            greedy
+        } else {
+            llmpager_run::sample::sample(&dec.last_logits(), &generated, &sampling, &mut rng)
+        };
     }
     let gen_s = t1.elapsed().as_secs_f64();
     if tokenizer.is_none() {
