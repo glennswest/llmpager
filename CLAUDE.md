@@ -142,9 +142,15 @@ weight_scale), 1.1TB — repack, don't requantize.
       first layer. Round-trip unit test vs reference dequant green.
       Attention/shared/dense stay bf16 in the core file — the runtime
       requantizes to q4g64 at load (bf16 core is 13.4GB, over VRAM).
-- [ ] Run converter on the real checkpoint when download completes
-      (watcher armed, binary rebuilt with kimi support; 472GB/1.1TB
-      as of 2026-08-08 morning)
+- [x] Real checkpoint converted (568GB int4 ckpt -> 570.9GB pack +
+      23.4GB core, ~25min); tokenizer.json built from tiktoken
+      (special-id mismatch in tokenizer_config found and fixed)
+- [x] **FIRST REAL TOKENS 2026-08-08**: coherent MoE explanation from
+      Kimi K2.6 (1T params) on the 16GB card — 0.35 tok/s decode,
+      2.1% hit, 829GB streamed (slots=4, O_DIRECT, cold cache).
+      Root-caused garbage-output bug: compressed-tensors int4 is
+      offset-binary (value+8), not two's complement; repack is now a
+      verbatim nibble copy, verified vs official unpack_from_int32
 - [x] Infra opts: VM RAM 64→128GB (host has 187GB); disk iothreads —
       8-thread O_DIRECT at 25MB blobs now 6.94 GB/s (was 3.6)
 - [x] Kernels: MLA set verified on GPU (worst rel err 3e-7) —
