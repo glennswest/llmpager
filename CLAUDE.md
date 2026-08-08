@@ -119,6 +119,33 @@ Version locations (must all match):
       just warm-count
 - [ ] Disk-bandwidth arbitration between concurrently faulting models
 
+### M6 — Kimi K2.6 (1T / 32B active) — in progress
+Target: moonshotai/Kimi-K2.6 (downloading to /data/models/kimi-k2.6;
+/data grown 800G→2TB). Text stack is DeepseekV3ForCausalLM inside a
+multimodal kimi_k25 wrapper (vision tower ignored). 61 layers (layer 0
+dense, 18432 inter), 384 routed experts top-8 + 1 shared (2048 inter),
+MLA (q_lora 1536, kv_lora 512, nope 128 + rope 64, v 128, 64 heads),
+YaRN (factor 64, orig 4096, theta 50000), sigmoid router with
+noaux_tc bias + routed_scaling 2.827, vocab 163840. Checkpoint is QAT
+**int4 group-32 symmetric** (compressed-tensors: weight_packed int32 +
+weight_scale), 1.1TB — repack, don't requantize.
+
+- [ ] Core: parametric group size (q4g32 alongside q4g64) — quant,
+      pack blob header already carries `group`
+- [ ] Kernels: q4g32 GEMV + batch variants (16B/group inner loop)
+- [ ] Converter: kimi_k25/deepseek_v3 arch — nested text_config,
+      compressed-tensors int4 repack, shared expert + dense layer 0 +
+      MLA tensors → core, vision tower skipped
+- [ ] Estimate check (from config): core ~7-8GB int4 in VRAM (MLA attn
+      ~6.7B params + shared/dense + lm_head), embed table host-side
+      (sparse row gather), MLA KV ~70KB/token → ~250 expert slots in
+      remaining VRAM; RAM tier caches ~2.5k of 23k experts
+- [ ] Kernels: MLA decode path (absorbed: cache c_kv 512 + k_rope 64
+      per token), YaRN RoPE variant
+- [ ] Runtime: DeepseekV3 decode loop (dense layer 0, shared expert,
+      sigmoid+bias router with scaling), Kimi chat template
+- [ ] Serve: register kimi; expect 0.5-1.5 tok/s (batch use)
+
 ## Session Log
 
 - 2026-08-06 (evening): M3 continued — RAM tier (`--direct=0`, biggest

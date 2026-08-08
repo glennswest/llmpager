@@ -174,3 +174,6 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **refactor:** presentation pipeline moved to the new gmedia project (github.com/glennswest/gmedia); docs/presentation now carries only gmedia.conf + narration
 - **docs:** Final narrated video produced with own-voice clone (F5-TTS, pop-filtered reference, per-clip polish), all-calm register, 13m32s; deck quote-box CSS repaired; narration tuned for synthesis. Voice source material purged from git history and gitignored — video ships via release/YouTube only
 - **docs:** YouTube thumbnails (two variants) + HTML source in docs/presentation
+
+### 2026-08-07 (Kimi)
+- **feat:** M6 started — Kimi K2.6 download to /data (grown to 2TB); arch scoped (DeepseekV3 text stack, int4 g32 QAT, MLA)
