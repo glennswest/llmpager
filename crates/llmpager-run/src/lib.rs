@@ -2,4 +2,5 @@
 //! HTTP server (`llmpager-serve`).
 
 pub mod decode;
+pub mod kimi;
 pub mod model;

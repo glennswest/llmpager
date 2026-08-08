@@ -316,10 +316,22 @@ pub fn run(_f: &Flags) -> Result<()> {
         let (dw, dx) = (g.up(&wb_bytes)?, g.up(f32s(&x))?);
         let dy = g.cuda.alloc_device(batch * rows * 4)?;
         g.kernels.bf16_gemv_batch(
-            &cuda, dw, (rows * cols) as u64, dx, 0, dy,
+            &cuda, dw, (rows * cols) as u64, dx, 0, dy, rows as i32,
             rows as i32, cols as i32, batch as i32, stream,
         )?;
         check("bf16_gemv_batch", &g.down_f32(dy, batch * rows)?, &want, 1e-4)?;
+
+        // Strided copy: scatter each batch's first 5 outputs into a wider
+        // record at offset 2.
+        let dwide = g.cuda.alloc_device(batch * 8 * 4)?;
+        g.kernels.strided_copy(&cuda, dy, rows as i32, 0, dwide, 8, 2, batch as i32, 5, stream)?;
+        let wide = g.down_f32(dwide, batch * 8)?;
+        for b in 0..batch {
+            for i in 0..5 {
+                assert!((wide[b * 8 + 2 + i] - want[b * rows + i]).abs() < 1e-6);
+            }
+        }
+        println!("strided_copy: OK");
     }
 
     println!("kernels: all decode kernels verified");

@@ -16,6 +16,13 @@ fn main() -> Result<()> {
         println!("synthetic checkpoint written to {}", dir.display());
         return Ok(());
     }
+    if let Some(dir) = arg(&args, "gen-test-kimi") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir)?;
+        llmpager_convert::kimi::write_test_checkpoint_kimi(&dir)?;
+        println!("synthetic kimi checkpoint written to {}", dir.display());
+        return Ok(());
+    }
     let (Some(model_dir), Some(out_pack), Some(out_core)) = (
         arg(&args, "model-dir"),
         arg(&args, "out-pack"),

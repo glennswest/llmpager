@@ -31,6 +31,7 @@ pub struct Kernels {
     mla_rope_f32: CUfunction,
     mla_attn_decode_f32: CUfunction,
     bf16_gemv_batch: CUfunction,
+    strided_copy_f32: CUfunction,
 }
 
 fn grid_1d(n: usize, block: u32) -> u32 {
@@ -46,6 +47,7 @@ impl Kernels {
             mla_rope_f32: cuda.function(mla, "mla_rope_f32")?,
             mla_attn_decode_f32: cuda.function(mla, "mla_attn_decode_f32")?,
             bf16_gemv_batch: cuda.function(mla, "bf16_gemv_batch")?,
+            strided_copy_f32: cuda.function(mla, "strided_copy_f32")?,
             q4g64_gemv: cuda.function(q4, "q4g64_gemv")?,
             q4g64_gemv_batch: cuda.function(q4, "q4g64_gemv_batch")?,
             moe_reduce_f32: cuda.function(q4, "moe_reduce_f32")?,
@@ -349,8 +351,8 @@ impl Kernels {
         cuda.launch(self.mla_attn_decode_f32, (heads as u32, 1, 1), (256, 1, 1), &mut p, stream)
     }
 
-    /// Batched bf16 GEMV: batch b does y+b*rows = (w + b*w_stride) x+b*x_stride.
-    /// Strides in elements; x_stride 0 shares the input across the batch.
+    /// Batched bf16 GEMV: batch b does y+b*y_stride = (w + b*w_stride) ·
+    /// (x + b*x_stride). Strides in elements; x_stride 0 shares the input.
     #[allow(clippy::too_many_arguments)]
     pub fn bf16_gemv_batch(
         &self,
@@ -360,15 +362,17 @@ impl Kernels {
         x: CUdeviceptr,
         x_stride: i32,
         y: CUdeviceptr,
+        y_stride: i32,
         rows: i32,
         cols: i32,
         batch: i32,
         stream: CUstream,
     ) -> Result<()> {
         const WARPS: u32 = 4;
-        let (mut w, mut ws, mut x, mut xs, mut y) = (w, w_stride, x, x_stride, y);
+        let (mut w, mut ws, mut x, mut xs, mut y, mut ys) =
+            (w, w_stride, x, x_stride, y, y_stride);
         let (mut r, mut c, mut b) = (rows, cols, batch);
-        let mut p = params![w, ws, x, xs, y, r, c, b];
+        let mut p = params![w, ws, x, xs, y, ys, r, c, b];
         cuda.launch(
             self.bf16_gemv_batch,
             ((rows as u32).div_ceil(WARPS), batch as u32, 1),
@@ -376,5 +380,28 @@ impl Kernels {
             &mut p,
             stream,
         )
+    }
+
+    /// Strided gather/scatter: for v in 0..n_vecs,
+    /// dst[v*dst_stride+dst_off..][..n] = src[v*src_stride+src_off..][..n].
+    #[allow(clippy::too_many_arguments)]
+    pub fn strided_copy(
+        &self,
+        cuda: &Cuda,
+        src: CUdeviceptr,
+        src_stride: i32,
+        src_off: i32,
+        dst: CUdeviceptr,
+        dst_stride: i32,
+        dst_off: i32,
+        n_vecs: i32,
+        n: i32,
+        stream: CUstream,
+    ) -> Result<()> {
+        let total = (n_vecs * n) as usize;
+        let (mut s, mut ss, mut so, mut d, mut ds, mut do_, mut nv, mut n_a) =
+            (src, src_stride, src_off, dst, dst_stride, dst_off, n_vecs, n);
+        let mut p = params![s, ss, so, d, ds, do_, nv, n_a];
+        cuda.launch(self.strided_copy_f32, (grid_1d(total, 256), 1, 1), (256, 1, 1), &mut p, stream)
     }
 }

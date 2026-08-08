@@ -1,9 +1,42 @@
-use llmpager_run::decode;
+use llmpager_run::{decode, kimi};
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
+
+/// Architecture dispatch: same decode surface over both engines.
+enum AnyDecoder {
+    Qwen(decode::Decoder),
+    Kimi(kimi::KimiDecoder),
+}
+
+impl AnyDecoder {
+    fn step(&mut self, token: u32, pos: usize, want_logits: bool) -> Result<u32> {
+        match self {
+            AnyDecoder::Qwen(d) => d.step(token, pos, want_logits),
+            AnyDecoder::Kimi(d) => d.step(token, pos, want_logits),
+        }
+    }
+    fn last_logits(&self) -> Vec<f32> {
+        match self {
+            AnyDecoder::Qwen(d) => d.last_logits(),
+            AnyDecoder::Kimi(d) => d.last_logits(),
+        }
+    }
+    fn pager_metrics(&self) -> llmpager_cuda::pager::Metrics {
+        match self {
+            AnyDecoder::Qwen(d) => d.pager_metrics(),
+            AnyDecoder::Kimi(d) => d.pager_metrics(),
+        }
+    }
+    fn eos(&self) -> &[u32] {
+        match self {
+            AnyDecoder::Qwen(d) => &d.cfg.eos,
+            AnyDecoder::Kimi(d) => &d.cfg.eos,
+        }
+    }
+}
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter().find_map(|a| a.strip_prefix(&format!("--{key}=")).map(String::from))
@@ -60,19 +93,38 @@ fn main() -> Result<()> {
         bail!("empty prompt");
     }
 
-    let mut dec = decode::Decoder::new(
-        &PathBuf::from(&pack),
-        &PathBuf::from(&core),
-        slots,
-        io_threads,
-        max_seq,
-        core_q4,
-        direct,
-    )?;
-    // Default off: measured 18.5 -> 10.8 tok/s. Qwen3 expert routing has
-    // ~zero cross-layer correlation; wrong prefetches evict good entries
-    // and triple disk traffic. Kept for experiments.
-    dec.prefetch_next = arg(&args, "prefetch-next").as_deref() == Some("1");
+    let pack_meta =
+        llmpager_core::pack::PackReader::open(&PathBuf::from(&pack))?.meta().clone();
+    let mut dec = if kimi::KimiConfig::is_kimi(&pack_meta.config) {
+        let mut d = kimi::KimiDecoder::new(
+            &PathBuf::from(&pack),
+            &PathBuf::from(&core),
+            slots,
+            io_threads,
+            max_seq,
+            direct,
+        )?;
+        // Fetch-traffic knob: drop routed experts below this scaled weight.
+        d.min_expert_weight = arg(&args, "min-expert-weight")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        AnyDecoder::Kimi(d)
+    } else {
+        let mut d = decode::Decoder::new(
+            &PathBuf::from(&pack),
+            &PathBuf::from(&core),
+            slots,
+            io_threads,
+            max_seq,
+            core_q4,
+            direct,
+        )?;
+        // Default off: measured 18.5 -> 10.8 tok/s. Qwen3 expert routing has
+        // ~zero cross-layer correlation; wrong prefetches evict good entries
+        // and triple disk traffic. Kept for experiments.
+        d.prefetch_next = arg(&args, "prefetch-next").as_deref() == Some("1");
+        AnyDecoder::Qwen(d)
+    };
 
     // Perplexity mode: teacher-forced NLL over a text file. Validates the
     // whole pipeline numerically — and PPL must be identical across cache
@@ -125,7 +177,7 @@ fn main() -> Result<()> {
     let mut printed = String::new();
     let t1 = Instant::now();
     for i in 0..max_tokens {
-        if dec.cfg.eos.contains(&next) {
+        if dec.eos().contains(&next) {
             break;
         }
         generated.push(next);

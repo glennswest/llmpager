@@ -222,16 +222,176 @@ fn build_kimi_blob(
     Ok((blob, max_scale_err))
 }
 
+fn f32_to_bf16(x: f32) -> u16 {
+    ((x.to_bits() + 0x8000) >> 16) as u16
+}
+
+/// Tiny but complete Kimi-shaped checkpoint (every tensor the runtime
+/// loads): 3 layers (1 dense), MLA dims scaled down, 8 packed int4 experts
+/// per MoE layer, YaRN rope config, plus a vision tensor that conversion
+/// must drop. Deterministic weights. Used by tests and
+/// `llmpager-convert --gen-test-kimi=DIR` for GPU smoke tests.
+pub fn write_test_checkpoint_kimi(dir: &Path) -> Result<()> {
+    let (layers, dense, experts) = (3usize, 1usize, 8usize);
+    let (hidden, q_lora, kv_lora, nope, rope, v_head) = (128usize, 64usize, 64usize, 32usize, 16usize, 32usize);
+    let (heads, moe_inter, dense_inter, vocab) = (4usize, 64usize, 128usize, 64usize);
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "model_type": "kimi_k25",
+            "text_config": {
+                "model_type": "kimi_k2",
+                "num_hidden_layers": layers,
+                "n_routed_experts": experts,
+                "first_k_dense_replace": dense,
+                "hidden_size": hidden,
+                "moe_intermediate_size": moe_inter,
+                "intermediate_size": dense_inter,
+                "num_experts_per_tok": 2,
+                "num_attention_heads": heads,
+                "q_lora_rank": q_lora,
+                "kv_lora_rank": kv_lora,
+                "qk_nope_head_dim": nope,
+                "qk_rope_head_dim": rope,
+                "v_head_dim": v_head,
+                "n_shared_experts": 1,
+                "routed_scaling_factor": 2.0,
+                "norm_topk_prob": true,
+                "rms_norm_eps": 1e-5,
+                "rope_theta": 50000.0,
+                "vocab_size": vocab,
+                "eos_token_id": 1,
+                "rope_scaling": {
+                    "type": "yarn", "factor": 4.0, "beta_fast": 32.0,
+                    "beta_slow": 1.0, "mscale": 1.0, "mscale_all_dim": 1.0,
+                    "original_max_position_embeddings": 64.0
+                },
+            },
+        }))?,
+    )?;
+
+    let mut header = serde_json::Map::new();
+    let mut data: Vec<u8> = Vec::new();
+    let mut rng = 11u64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let mut add = |name: String,
+                   dtype: &str,
+                   shape: Vec<usize>,
+                   bytes: Vec<u8>,
+                   header: &mut serde_json::Map<String, serde_json::Value>,
+                   data: &mut Vec<u8>| {
+        let start = data.len();
+        data.extend_from_slice(&bytes);
+        header.insert(
+            name,
+            serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [start, start + bytes.len()]}),
+        );
+    };
+    let mut bf16v = |n: usize, next: &mut dyn FnMut() -> u64| -> Vec<u8> {
+        (0..n)
+            .flat_map(|_| {
+                f32_to_bf16(((next() % 2000) as f32 / 1000.0 - 1.0) * 0.15).to_le_bytes()
+            })
+            .collect()
+    };
+
+    let mut bf16 = |name: String, shape: Vec<usize>, header: &mut serde_json::Map<String, serde_json::Value>, data: &mut Vec<u8>, next: &mut dyn FnMut() -> u64| {
+        let n: usize = shape.iter().product();
+        let bytes = bf16v(n, next);
+        add(name, "BF16", shape, bytes, header, data);
+    };
+
+    bf16("language_model.model.embed_tokens.weight".into(), vec![vocab, hidden], &mut header, &mut data, &mut next);
+    bf16("language_model.lm_head.weight".into(), vec![vocab, hidden], &mut header, &mut data, &mut next);
+    bf16("language_model.model.norm.weight".into(), vec![hidden], &mut header, &mut data, &mut next);
+    bf16("vision_tower.encoder.blocks.0.attn.weight".into(), vec![8], &mut header, &mut data, &mut next);
+
+    for l in 0..layers {
+        let p = format!("language_model.model.layers.{l}");
+        for (n, shape) in [
+            ("input_layernorm.weight", vec![hidden]),
+            ("post_attention_layernorm.weight", vec![hidden]),
+            ("self_attn.q_a_proj.weight", vec![q_lora, hidden]),
+            ("self_attn.q_a_layernorm.weight", vec![q_lora]),
+            ("self_attn.q_b_proj.weight", vec![heads * (nope + rope), q_lora]),
+            ("self_attn.kv_a_proj_with_mqa.weight", vec![kv_lora + rope, hidden]),
+            ("self_attn.kv_a_layernorm.weight", vec![kv_lora]),
+            ("self_attn.kv_b_proj.weight", vec![heads * (nope + v_head), kv_lora]),
+            ("self_attn.o_proj.weight", vec![hidden, heads * v_head]),
+        ] {
+            bf16(format!("{p}.{n}"), shape, &mut header, &mut data, &mut next);
+        }
+        if l < dense {
+            for (n, shape) in [
+                ("mlp.gate_proj.weight", vec![dense_inter, hidden]),
+                ("mlp.up_proj.weight", vec![dense_inter, hidden]),
+                ("mlp.down_proj.weight", vec![hidden, dense_inter]),
+            ] {
+                bf16(format!("{p}.{n}"), shape, &mut header, &mut data, &mut next);
+            }
+        } else {
+            bf16(format!("{p}.mlp.gate.weight"), vec![experts, hidden], &mut header, &mut data, &mut next);
+            let bias: Vec<u8> = (0..experts)
+                .flat_map(|_| {
+                    f32_to_bf16((next() % 100) as f32 / 1000.0).to_le_bytes()
+                })
+                .collect();
+            add(format!("{p}.mlp.gate.e_score_correction_bias"), "BF16", vec![experts], bias, &mut header, &mut data);
+            for (n, shape) in [
+                ("mlp.shared_experts.gate_proj.weight", vec![moe_inter, hidden]),
+                ("mlp.shared_experts.up_proj.weight", vec![moe_inter, hidden]),
+                ("mlp.shared_experts.down_proj.weight", vec![hidden, moe_inter]),
+            ] {
+                bf16(format!("{p}.{n}"), shape, &mut header, &mut data, &mut next);
+            }
+            for e in 0..experts {
+                for (proj, rows, cols) in [
+                    ("gate_proj", moe_inter, hidden),
+                    ("up_proj", moe_inter, hidden),
+                    ("down_proj", hidden, moe_inter),
+                ] {
+                    let base = format!("{p}.mlp.experts.{e}.{proj}.weight");
+                    let words: Vec<u8> = (0..rows * cols / 8)
+                        .flat_map(|_| (next() as u32).to_le_bytes())
+                        .collect();
+                    add(format!("{base}_packed"), "I32", vec![rows, cols / 8], words, &mut header, &mut data);
+                    let scales: Vec<u8> = (0..rows * cols / 32)
+                        .flat_map(|_| {
+                            f32_to_bf16(((next() % 900) + 100) as f32 / 30000.0).to_le_bytes()
+                        })
+                        .collect();
+                    add(format!("{base}_scale"), "BF16", vec![rows, cols / 32], scales, &mut header, &mut data);
+                    let shape: Vec<u8> =
+                        [(rows as i32).to_le_bytes(), (cols as i32).to_le_bytes()].concat();
+                    add(format!("{base}_shape"), "I32", vec![2], shape, &mut header, &mut data);
+                }
+            }
+        }
+    }
+
+    let mut hdr = serde_json::to_vec(&serde_json::Value::Object(header))?;
+    while hdr.len() % 8 != 0 {
+        hdr.push(b' ');
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&(hdr.len() as u64).to_le_bytes());
+    out.extend_from_slice(&hdr);
+    out.extend_from_slice(&data);
+    std::fs::write(dir.join("model.safetensors"), out)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use llmpager_core::pack::PackReader;
     use llmpager_core::quant::q4_dequantize;
     use std::path::PathBuf;
-
-    fn f32_to_bf16(x: f32) -> u16 {
-        ((x.to_bits() + 0x8000) >> 16) as u16
-    }
 
     /// Tiny kimi-shaped checkpoint: 3 layers (1 dense), 2 experts,
     /// hidden 64, moe inter 32, plus vision tensors that must be skipped.
@@ -327,6 +487,21 @@ mod tests {
         out.extend_from_slice(&hdr);
         out.extend_from_slice(&data);
         std::fs::write(dir.join("model.safetensors"), out)?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_test_checkpoint_converts() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write_test_checkpoint_kimi(dir.path())?;
+        let report = convert_kimi(
+            dir.path(),
+            &dir.path().join("k.llmpk"),
+            &dir.path().join("k.core.safetensors"),
+        )?;
+        assert_eq!((report.layers, report.experts), (2, 8));
+        let r = PackReader::open(&dir.path().join("k.llmpk"))?;
+        assert_eq!(r.meta().config["kv_lora_rank"], 64);
         Ok(())
     }
 

@@ -109,7 +109,9 @@ extern "C" __global__ void mla_attn_decode_f32(
 
 // Batched bf16 GEMV: batch b computes y_b = W_b x_b with
 // W_b = w + b*w_stride (row-major [rows, cols]), x_b = x + b*x_stride,
-// y_b = y + b*rows. Strides in elements; x_stride 0 shares the input.
+// y_b = y + b*y_stride. Strides in elements; x_stride 0 shares the input,
+// y_stride lets outputs interleave into a wider per-batch record (e.g. the
+// 512-dim absorbed query written into a 576-dim [q_eff | q_rope] row).
 // Used per-head for W_kvb_k^T (q absorption) and W_kvb_v (ctx -> v).
 extern "C" __global__ void bf16_gemv_batch(
     const unsigned short* __restrict__ w,
@@ -117,6 +119,7 @@ extern "C" __global__ void bf16_gemv_batch(
     const float* __restrict__ x,
     int x_stride,
     float* __restrict__ y,
+    int y_stride,
     int rows,
     int cols,
     int batch)
@@ -125,7 +128,7 @@ extern "C" __global__ void bf16_gemv_batch(
     if (b >= batch) return;
     const unsigned short* wb = w + (size_t)b * w_stride;
     const float* xb = x + (size_t)b * x_stride;
-    float* yb = y + (size_t)b * rows;
+    float* yb = y + (size_t)b * y_stride;
 
     const int row = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
     const int lane = threadIdx.x & 31;
@@ -138,4 +141,26 @@ extern "C" __global__ void bf16_gemv_batch(
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
     if (lane == 0) yb[row] = acc;
+}
+
+// dst[v*dst_stride + dst_off + i] = src[v*src_stride + src_off + i]
+// for v in [0, n_vecs), i in [0, n). Strided gather/scatter used to
+// assemble MLA query rows and append cache entries.
+extern "C" __global__ void strided_copy_f32(
+    const float* __restrict__ src,
+    int src_stride,
+    int src_off,
+    float* __restrict__ dst,
+    int dst_stride,
+    int dst_off,
+    int n_vecs,
+    int n)
+{
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n_vecs * n;
+         idx += gridDim.x * blockDim.x) {
+        const int v = idx / n;
+        const int i = idx % n;
+        dst[(size_t)v * dst_stride + dst_off + i] =
+            src[(size_t)v * src_stride + src_off + i];
+    }
 }
