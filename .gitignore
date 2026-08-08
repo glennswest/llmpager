@@ -57,3 +57,5 @@ docs/presentation/voice/
 docs/presentation/voice*/
 docs/presentation/*.wav
 docs/presentation/*.m4a
+docs/presentation/kimi-build/*
+!docs/presentation/kimi-build/gmedia.conf

@@ -244,3 +244,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **feat:** FIRST REAL KIMI TOKENS — 1T-param Kimi K2.6 decodes coherently on the RTX 5060 Ti (0.35 tok/s cold, 829GB streamed); int4 offset-binary fix was the final bug
 - **feat:** M8-1 RAM tier shipped and measured: Kimi 0.35 -> 0.57 tok/s (+63%) on the first still-cold run
 - **docs:** Kimi milestone presentation (kimi.html, 15 slides + narration)
+- **docs:** Kimi milestone video built (kimi-video.mp4, 8:56, 15 slides, edge-TTS) + kimi.pdf export
