@@ -1,5 +1,22 @@
 # Benchmarks
 
+## Kimi K2.6 (1T / 32B active) first light — 2026-08-08, ai.g8.lo
+
+570.9GB expert pack (int4 g32, bit-exact QAT repack) + 23.4GB core
+(q4g64-requantized at load, embeddings host-side). 16GB RTX 5060 Ti,
+slots=4/layer (~400MB more VRAM would not fit), O_DIRECT, cold cache.
+
+| Metric | Value |
+|---|---|
+| Decode | 0.35 tok/s |
+| Prefill (22 tok, union) | 0.74 tok/s |
+| Expert cache hit | 2.1% |
+| Streamed for 60 tokens | 829 GB |
+
+Output is coherent and on-topic. At a 2.1% hit rate this is the
+disk-bound floor; the M8 RAM tier (~17% of experts in host RAM) and
+profiling-driven pre-warm are the planned levers toward 1-2 tok/s.
+
 ## M0 — 2026-08-06, ai.g8.lo
 
 Hardware: RTX 5060 Ti 16GB (vfio passthrough), 12 vCPU, 64GB RAM, virtio-scsi
