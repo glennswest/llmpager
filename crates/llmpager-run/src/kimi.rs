@@ -876,7 +876,12 @@ impl KimiDecoder {
                     ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, self.expert_group, e, st)?;
                     ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, h_at(self.h_buf, t), e, hid, st)?;
                 }
-                self.defer_release(handles)?;
+                // Eager release (see decode.rs): deferring would deadlock
+                // the next wave's request().
+                cu.sync_stream(st)?;
+                for h in handles {
+                    self.pager.as_ref().unwrap().release(h);
+                }
             }
         }
 

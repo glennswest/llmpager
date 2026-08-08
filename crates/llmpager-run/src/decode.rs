@@ -442,7 +442,14 @@ impl Decoder {
                     ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, self.expert_group, e, st)?;
                     ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, h_at(self.h_buf, t), e, hid, st)?;
                 }
-                self.defer_release(handles)?;
+                // Eager release: the next wave's request() blocks on free
+                // slots, and nothing else would drain a deferred queue —
+                // deferring here deadlocks. One sync per wave is amortized
+                // over the whole chunk.
+                cu.sync_stream(st)?;
+                for h in handles {
+                    self.pager.as_ref().unwrap().release(h);
+                }
             }
         }
 
