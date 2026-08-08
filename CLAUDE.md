@@ -143,18 +143,27 @@ weight_scale), 1.1TB — repack, don't requantize.
       Attention/shared/dense stay bf16 in the core file — the runtime
       requantizes to q4g64 at load (bf16 core is 13.4GB, over VRAM).
 - [ ] Run converter on the real checkpoint when download completes
-      (arm watcher: convert-one.sh pattern for moonshotai/Kimi-K2.6)
+      (watcher armed, binary rebuilt with kimi support; 472GB/1.1TB
+      as of 2026-08-08 morning)
 - [x] Infra opts: VM RAM 64→128GB (host has 187GB); disk iothreads —
       8-thread O_DIRECT at 25MB blobs now 6.94 GB/s (was 3.6)
-- [ ] Estimate check (from config): core ~7-8GB int4 in VRAM (MLA attn
-      ~6.7B params + shared/dense + lm_head), embed table host-side
-      (sparse row gather), MLA KV ~70KB/token → ~250 expert slots in
-      remaining VRAM; RAM tier caches ~2.5k of 23k experts
-- [ ] Kernels: MLA decode path (absorbed: cache c_kv 512 + k_rope 64
-      per token), YaRN RoPE variant
-- [ ] Runtime: DeepseekV3 decode loop (dense layer 0, shared expert,
-      sigmoid+bias router with scaling), Kimi chat template
-- [ ] Serve: register kimi; expect 0.5-1.5 tok/s (batch use)
+- [x] Kernels: MLA set verified on GPU (worst rel err 3e-7) —
+      mla_rope (interleaved pairs, host freq table), mla_attn_decode
+      (MQA over compressed [max_seq, 576] cache), bf16_gemv_batch
+      (strided w/x/y), strided_copy
+- [x] Runtime: KimiDecoder — absorbed MLA decode (kv_b reordered to
+      kt/vw at load), whole core q4g64-requantized, embed table
+      host-resident (row gather per token), sigmoid+bias router
+      (weights from unbiased scores, renorm × routed_scaling), shared
+      expert, dense layer 0, YaRN inv_freq + softmax mscale;
+      AnyDecoder CLI dispatch on kv_lora_rank; --min-expert-weight
+      expert-dropping knob
+- [x] Synthetic end-to-end on GPU: gen-test-kimi → convert → decode:
+      deterministic tokens, bit-identical across cache sizes
+- [ ] Serve: register kimi (AnyDecoder in llmpager-serve); Kimi chat
+      template; expect 0.5-1.5 tok/s single-stream (batch use)
+- [ ] Union prefill (chunked, per-layer expert union) — required for
+      usable prompt processing at Kimi scale
 
 ## Session Log
 
