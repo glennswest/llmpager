@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const KERNELS: &[&str] = &["q4g64", "decode"];
+const KERNELS: &[&str] = &["q4g64", "decode", "mla"];
 
 fn main() {
     for k in KERNELS {

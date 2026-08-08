@@ -6,6 +6,7 @@ use crate::driver::{CUdeviceptr, CUfunction, CUstream, Cuda};
 
 pub const Q4G64_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/q4g64.ptx"));
 pub const DECODE_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/decode.ptx"));
+pub const MLA_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/mla.ptx"));
 
 macro_rules! params {
     ($($arg:expr),* $(,)?) => {{
@@ -27,6 +28,9 @@ pub struct Kernels {
     rope_f32: CUfunction,
     attn_decode_f32: CUfunction,
     bf16_row_to_f32: CUfunction,
+    mla_rope_f32: CUfunction,
+    mla_attn_decode_f32: CUfunction,
+    bf16_gemv_batch: CUfunction,
 }
 
 fn grid_1d(n: usize, block: u32) -> u32 {
@@ -37,7 +41,11 @@ impl Kernels {
     pub fn load(cuda: &Cuda) -> Result<Self> {
         let q4 = cuda.module_from_ptx(Q4G64_PTX)?;
         let de = cuda.module_from_ptx(DECODE_PTX)?;
+        let mla = cuda.module_from_ptx(MLA_PTX)?;
         Ok(Self {
+            mla_rope_f32: cuda.function(mla, "mla_rope_f32")?,
+            mla_attn_decode_f32: cuda.function(mla, "mla_attn_decode_f32")?,
+            bf16_gemv_batch: cuda.function(mla, "bf16_gemv_batch")?,
             q4g64_gemv: cuda.function(q4, "q4g64_gemv")?,
             q4g64_gemv_batch: cuda.function(q4, "q4g64_gemv_batch")?,
             moe_reduce_f32: cuda.function(q4, "moe_reduce_f32")?,
@@ -289,5 +297,84 @@ impl Kernels {
         let (mut t, mut r, mut n_a, mut o) = (table, row, n, out);
         let mut p = params![t, r, n_a, o];
         cuda.launch(self.bf16_row_to_f32, (grid_1d(n as usize, 256), 1, 1), (256, 1, 1), &mut p, stream)
+    }
+
+    /// Interleaved RoPE with a precomputed inv_freq table (device array of
+    /// `half` f32): rotates pairs (2i, 2i+1) of the slice at `offset` in
+    /// each of `n_vecs` vectors of stride `stride`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mla_rope(
+        &self,
+        cuda: &Cuda,
+        x: CUdeviceptr,
+        n_vecs: i32,
+        stride: i32,
+        offset: i32,
+        half: i32,
+        pos: i32,
+        inv_freq: CUdeviceptr,
+        mscale: f32,
+        stream: CUstream,
+    ) -> Result<()> {
+        let n = (n_vecs * half) as usize;
+        let (mut x, mut nv, mut st, mut off, mut ha, mut pos_a, mut fr, mut ms) =
+            (x, n_vecs, stride, offset, half, pos, inv_freq, mscale);
+        let mut p = params![x, nv, st, off, ha, pos_a, fr, ms];
+        cuda.launch(self.mla_rope_f32, (grid_1d(n, 256), 1, 1), (256, 1, 1), &mut p, stream)
+    }
+
+    /// MLA/MQA decode attention over a shared compressed cache
+    /// [max_seq, qk_dim]; ctx gets the softmax-weighted sum of the first
+    /// c_dim dims. scratch is [heads, max_seq].
+    #[allow(clippy::too_many_arguments)]
+    pub fn mla_attn_decode(
+        &self,
+        cuda: &Cuda,
+        q: CUdeviceptr,
+        cache: CUdeviceptr,
+        ctx: CUdeviceptr,
+        scratch: CUdeviceptr,
+        heads: i32,
+        qk_dim: i32,
+        c_dim: i32,
+        seq_len: i32,
+        max_seq: i32,
+        scale: f32,
+        stream: CUstream,
+    ) -> Result<()> {
+        let (mut q, mut ca, mut ctx_a, mut s) = (q, cache, ctx, scratch);
+        let (mut h, mut qd, mut cd, mut sl, mut ms, mut sc) =
+            (heads, qk_dim, c_dim, seq_len, max_seq, scale);
+        let mut p = params![q, ca, ctx_a, s, h, qd, cd, sl, ms, sc];
+        cuda.launch(self.mla_attn_decode_f32, (heads as u32, 1, 1), (256, 1, 1), &mut p, stream)
+    }
+
+    /// Batched bf16 GEMV: batch b does y+b*rows = (w + b*w_stride) x+b*x_stride.
+    /// Strides in elements; x_stride 0 shares the input across the batch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bf16_gemv_batch(
+        &self,
+        cuda: &Cuda,
+        w: CUdeviceptr,
+        w_stride: u64,
+        x: CUdeviceptr,
+        x_stride: i32,
+        y: CUdeviceptr,
+        rows: i32,
+        cols: i32,
+        batch: i32,
+        stream: CUstream,
+    ) -> Result<()> {
+        const WARPS: u32 = 4;
+        let (mut w, mut ws, mut x, mut xs, mut y) = (w, w_stride, x, x_stride, y);
+        let (mut r, mut c, mut b) = (rows, cols, batch);
+        let mut p = params![w, ws, x, xs, y, r, c, b];
+        cuda.launch(
+            self.bf16_gemv_batch,
+            ((rows as u32).div_ceil(WARPS), batch as u32, 1),
+            (WARPS * 32, 1, 1),
+            &mut p,
+            stream,
+        )
     }
 }

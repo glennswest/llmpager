@@ -238,6 +238,90 @@ pub fn run(_f: &Flags) -> Result<()> {
         check("bf16_row", &g.down_f32(dout, n)?, &want, 1e-6)?;
     }
 
+    // mla_rope: interleaved pairs with a freq table, applied at an offset
+    // inside strided vectors.
+    {
+        let (n_vecs, stride, offset, half, pos, mscale) = (3usize, 20usize, 4usize, 6usize, 9i32, 1.25f32);
+        let x = rnd(n_vecs * stride);
+        let freqs: Vec<f32> = (0..half).map(|i| 0.5f32.powi(i as i32) * 0.3).collect();
+        let mut want = x.clone();
+        for v in 0..n_vecs {
+            for i in 0..half {
+                let ang = pos as f32 * freqs[i];
+                let (s, c) = (ang.sin() * mscale, ang.cos() * mscale);
+                let b = v * stride + offset + 2 * i;
+                let (x1, x2) = (x[b], x[b + 1]);
+                want[b] = x1 * c - x2 * s;
+                want[b + 1] = x1 * s + x2 * c;
+            }
+        }
+        let dx = g.up(f32s(&x))?;
+        let df = g.up(f32s(&freqs))?;
+        g.kernels.mla_rope(
+            &cuda, dx, n_vecs as i32, stride as i32, offset as i32,
+            half as i32, pos, df, mscale, stream,
+        )?;
+        check("mla_rope", &g.down_f32(dx, n_vecs * stride)?, &want, 1e-4)?;
+    }
+
+    // mla_attn_decode: MQA over a shared [max_seq, qk_dim] cache; ctx sums
+    // only the first c_dim dims.
+    {
+        let (heads, qk_dim, c_dim, seq, max_seq) = (4usize, 24usize, 16usize, 7usize, 12usize);
+        let scale = 0.31f32;
+        let q = rnd(heads * qk_dim);
+        let cache = rnd(max_seq * qk_dim);
+        let mut want = vec![0f32; heads * c_dim];
+        for h in 0..heads {
+            let scores: Vec<f32> = (0..seq)
+                .map(|p| {
+                    (0..qk_dim).map(|d| q[h * qk_dim + d] * cache[p * qk_dim + d]).sum::<f32>()
+                        * scale
+                })
+                .collect();
+            let m = scores.iter().cloned().fold(f32::MIN, f32::max);
+            let exps: Vec<f32> = scores.iter().map(|s| (s - m).exp()).collect();
+            let z: f32 = exps.iter().sum();
+            for d in 0..c_dim {
+                want[h * c_dim + d] =
+                    (0..seq).map(|p| exps[p] / z * cache[p * qk_dim + d]).sum();
+            }
+        }
+        let (dq, dc) = (g.up(f32s(&q))?, g.up(f32s(&cache))?);
+        let dctx = g.cuda.alloc_device(heads * c_dim * 4)?;
+        let dscratch = g.cuda.alloc_device(heads * max_seq * 4)?;
+        g.kernels.mla_attn_decode(
+            &cuda, dq, dc, dctx, dscratch,
+            heads as i32, qk_dim as i32, c_dim as i32,
+            seq as i32, max_seq as i32, scale, stream,
+        )?;
+        check("mla_attn_decode", &g.down_f32(dctx, heads * c_dim)?, &want, 1e-3)?;
+    }
+
+    // bf16_gemv_batch: strided weights, shared input (x_stride 0).
+    {
+        let (rows, cols, batch) = (16usize, 32usize, 3usize);
+        let wf = rnd(batch * rows * cols);
+        let x = rnd(cols);
+        let wb: Vec<u16> = wf.iter().map(|v| bf16_round(*v)).collect();
+        let mut want = vec![0f32; batch * rows];
+        for b in 0..batch {
+            for r in 0..rows {
+                want[b * rows + r] = (0..cols)
+                    .map(|c| bf16_val(wb[(b * rows + r) * cols + c]) * x[c])
+                    .sum();
+            }
+        }
+        let wb_bytes: Vec<u8> = wb.iter().flat_map(|h| h.to_le_bytes()).collect();
+        let (dw, dx) = (g.up(&wb_bytes)?, g.up(f32s(&x))?);
+        let dy = g.cuda.alloc_device(batch * rows * 4)?;
+        g.kernels.bf16_gemv_batch(
+            &cuda, dw, (rows * cols) as u64, dx, 0, dy,
+            rows as i32, cols as i32, batch as i32, stream,
+        )?;
+        check("bf16_gemv_batch", &g.down_f32(dy, batch * rows)?, &want, 1e-4)?;
+    }
+
     println!("kernels: all decode kernels verified");
     Ok(())
 }
