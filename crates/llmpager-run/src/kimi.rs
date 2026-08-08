@@ -664,25 +664,43 @@ impl KimiDecoder {
             ke.silu_mul(cu, self.sh_gate, self.sh_up, self.sh_gate, c.moe_inter as i32, st)?;
             mat_gemv(ke, cu, &sh[2], self.sh_gate, self.sh_out, st)?;
 
-            let ids: Vec<u16> = picks.iter().map(|p| p.0).collect();
+            // Kimi's top-k can exceed the per-layer slot count (huge experts,
+            // small VRAM cache), so decode fetches in waves like prefill:
+            // moe_reduce accumulates into h across waves.
             let pack_layer = (l - c.dense_layers) as u16;
-            let handles = self.pager.as_ref().unwrap().request(pack_layer, &ids)?;
-            for handle in &handles {
-                self.pager.as_ref().unwrap().wait_stream(handle, st)?;
-            }
-            let e = handles.len() as i32;
-            let ptrs: Vec<u8> = handles.iter().flat_map(|h| h.dev.to_le_bytes()).collect();
-            let wts: Vec<u8> = picks.iter().flat_map(|p| p.1.to_le_bytes()).collect();
-            cu.htod_async(self.d_expert_ptrs, &ptrs, st)?;
-            cu.htod_async(self.d_expert_wts, &wts, st)?;
+            let slots = self.pager.as_ref().unwrap().slots_per_layer() as usize;
             let inter = c.moe_inter as i32;
-            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.gate_off, self.h_norm, 0, self.gate_out, inter, hid, self.expert_group, e, st)?;
-            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.up_off, self.h_norm, 0, self.up_out, inter, hid, self.expert_group, e, st)?;
-            ke.silu_mul(cu, self.gate_out, self.up_out, self.act_out, e * inter, st)?;
-            ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, self.expert_group, e, st)?;
-            ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, self.h, e, hid, st)?;
+            let single_wave = picks.len() <= slots;
+            for wave in picks.chunks(slots.max(1)) {
+                let ids: Vec<u16> = wave.iter().map(|p| p.0).collect();
+                let handles = self.pager.as_ref().unwrap().request(pack_layer, &ids)?;
+                for handle in &handles {
+                    self.pager.as_ref().unwrap().wait_stream(handle, st)?;
+                }
+                let e = handles.len() as i32;
+                let ptrs: Vec<u8> =
+                    handles.iter().flat_map(|h| h.dev.to_le_bytes()).collect();
+                let wts: Vec<u8> = wave.iter().flat_map(|p| p.1.to_le_bytes()).collect();
+                cu.htod_async(self.d_expert_ptrs, &ptrs, st)?;
+                cu.htod_async(self.d_expert_wts, &wts, st)?;
+                ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.gate_off, self.h_norm, 0, self.gate_out, inter, hid, self.expert_group, e, st)?;
+                ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.up_off, self.h_norm, 0, self.up_out, inter, hid, self.expert_group, e, st)?;
+                ke.silu_mul(cu, self.gate_out, self.up_out, self.act_out, e * inter, st)?;
+                ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, self.expert_group, e, st)?;
+                ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, self.h, e, hid, st)?;
+                if single_wave {
+                    // Pipeline-friendly path: defer release on an event.
+                    self.defer_release(handles)?;
+                } else {
+                    // Multi-wave: the next wave's request needs these slots
+                    // back; sync and release eagerly.
+                    cu.sync_stream(st)?;
+                    for h in handles {
+                        self.pager.as_ref().unwrap().release(h);
+                    }
+                }
+            }
             ke.add(cu, self.h, self.sh_out, hid, st)?;
-            self.defer_release(handles)?;
         }
 
         if !want_logits {
@@ -746,9 +764,9 @@ impl KimiDecoder {
             cu.sync_stream(st)?; // embed_row is reused next iteration
         }
 
-        let wave = ((self.pager.as_ref().unwrap().slots_per_layer() as usize) / 2)
-            .max(c.top_k)
-            .min(self.chunk_cap * c.top_k);
+        // Waves release eagerly, so a wave may use every slot in the layer —
+        // but never more (request() rejects that outright).
+        let wave = (self.pager.as_ref().unwrap().slots_per_layer() as usize).max(1);
 
         for l in 0..c.layers {
             let w = &self.core.layers[l];

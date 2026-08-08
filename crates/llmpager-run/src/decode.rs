@@ -354,9 +354,9 @@ impl Decoder {
             ke.bf16_row(cu, self.core.embed, *tok as i32, hid, h_at(self.h_buf, t), st)?;
         }
 
-        let wave = ((self.pager.as_ref().unwrap().slots_per_layer() as usize) / 2)
-            .max(c.top_k)
-            .min(self.chunk_cap * c.top_k);
+        // Waves release eagerly, so a wave may use every slot in the layer —
+        // but never more (request() rejects that outright).
+        let wave = (self.pager.as_ref().unwrap().slots_per_layer() as usize).max(1);
 
         for l in 0..c.layers {
             let w = &self.core.layers[l];
