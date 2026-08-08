@@ -1,5 +1,28 @@
 # Changelog
 
+## [v0.13.0] — 2026-08-08
+
+**Kimi K2.6 (1T / 32B active) runs on the 16GB GPU.** First coherent
+tokens 2026-08-08: 0.35 tok/s cold-cache at 2.1% hit, 829GB streamed
+for 60 tokens, slots=4/layer.
+
+### Added
+- Kimi/DeepSeek-V3 engine: MLA absorbed decode over the compressed
+  576-float cache, sigmoid+bias router, shared expert, dense first
+  layer, YaRN; wave-based expert fetching when top-k exceeds slots
+- Kimi converter: bit-exact int4 QAT repack (offset-binary — verified
+  against compressed-tensors' unpack_from_int32), prefix-stripped core,
+  vision tower dropped; tokenizer.json built from tiktoken (with
+  special-id fix for a tokenizer_config mismatch)
+- f16 KV cache default (PPL +0.07% = noise, +14% decode speed)
+- kimi-k2.6 registered in serve.json; layer-0 differential debug
+  harness (LLMPAGER_DEBUG probes + CPU reference)
+
+### Fixed
+- compressed-tensors int4 sign convention (was two's complement,
+  is offset-binary) — the garbage-output bug on first Kimi run
+- Expert waves capped at slot count; eager release in multi-wave decode
+
 ## [v0.12.0] — 2026-08-08
 
 ### Added
