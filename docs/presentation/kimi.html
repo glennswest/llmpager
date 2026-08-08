@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llmpager — One Trillion Parameters on a 16GB GPU</title>
+<style>
+  :root {
+    --rh-red: #EE0000;
+    --rh-dark-red: #A30000;
+    --rh-black: #151515;
+    --rh-gray: #6A6E73;
+    --rh-light: #F2F2F2;
+    --rh-white: #FFFFFF;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: var(--rh-black); }
+  body {
+    font-family: "Red Hat Text", "Red Hat Display", "Inter", "Helvetica Neue", Arial, sans-serif;
+    color: var(--rh-black);
+    overflow: hidden;
+  }
+  .deck { height: 100vh; width: 100vw; position: relative; }
+  section.slide {
+    position: absolute; inset: 0;
+    display: none;
+    flex-direction: column;
+    padding: 4.5vh 5vw 7vh 5vw;
+    background: var(--rh-white);
+  }
+  section.slide.active { display: flex; }
+  section.dark { background: var(--rh-black); color: var(--rh-white); }
+  section.red-strip::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 10px;
+    background: var(--rh-red);
+  }
+  h1 { font-family: "Red Hat Display", "Inter", Arial, sans-serif; font-weight: 900; font-size: 5.2vh; line-height: 1.15; }
+  h2 { font-family: "Red Hat Display", "Inter", Arial, sans-serif; font-weight: 700; font-size: 4.2vh; margin-bottom: 2.2vh; }
+  h2 .accent { color: var(--rh-red); }
+  h3 { font-size: 2.6vh; font-weight: 700; margin: 1.6vh 0 0.8vh 0; }
+  p, li { font-size: 2.4vh; line-height: 1.5; }
+  li { margin-bottom: 1.1vh; }
+  ul { padding-left: 3.2vh; }
+  .sub { color: var(--rh-gray); }
+  .dark .sub { color: #B8BBBE; }
+  .kicker {
+    color: var(--rh-red); font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; font-size: 1.9vh; margin-bottom: 1.4vh;
+  }
+  .grow { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .cols { display: flex; gap: 4vw; align-items: flex-start; }
+  .cols > div { flex: 1; min-width: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.2vh 0; }
+  th, td { text-align: left; padding: 1.1vh 1.4vh; font-size: 2.2vh; border-bottom: 1px solid #D2D2D2; }
+  th { border-bottom: 3px solid var(--rh-red); font-weight: 700; }
+  .dark th, .dark td { border-color: #3C3F42; }
+  .dark th { border-bottom-color: var(--rh-red); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .hero-num { font-family: "Red Hat Display", Arial, sans-serif; font-weight: 900; font-size: 8.5vh; color: var(--rh-red); line-height: 1; }
+  .hero-label { font-size: 2.3vh; color: var(--rh-gray); margin-top: 0.8vh; }
+  .stat-row { display: flex; gap: 3vw; margin: 2.5vh 0; }
+  .stat { flex: 1; border-top: 4px solid var(--rh-red); padding-top: 1.2vh; }
+  code, pre {
+    font-family: "Red Hat Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 1.95vh;
+  }
+  pre {
+    background: var(--rh-black); color: #E8E8E8; padding: 1.8vh 2vh;
+    border-left: 5px solid var(--rh-red);
+    overflow-x: auto; line-height: 1.5; margin: 1.2vh 0;
+  }
+  .dark pre { background: #212427; }
+  pre .c { color: #8A8D90; }
+  pre .g { color: #5BA352; }
+  pre .r { color: #FF6B6B; }
+  .plain {
+    background: var(--rh-light); border-left: 6px solid var(--rh-gray);
+    padding: 1.2vh 2vh; margin: 1.6vh 0; font-size: 2.1vh; line-height: 1.5;
+  }
+  .plain b:first-child { color: var(--rh-red); }
+  .dark .plain { background: #212427; }
+  .quote {
+    border-left: 6px solid var(--rh-red); padding: 1vh 2.4vh; margin: 2vh 0;
+    font-size: 2.7vh; font-style: italic; background: var(--rh-light);
+  }
+  .dark .quote { background: #212427; }
+  .footer {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 5vh;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 5vw; font-size: 1.7vh; color: var(--rh-gray);
+    border-top: 1px solid #E8E8E8;
+    background: inherit;
+  }
+  .dark .footer { border-top-color: #3C3F42; }
+  .brandmark { font-family: "Red Hat Display", Arial, sans-serif; font-weight: 900; }
+  .brandmark .hat { color: var(--rh-red); }
+  .counter { font-variant-numeric: tabular-nums; }
+  .bar-chart { margin: 1.5vh 0; }
+  .bar-row { display: flex; align-items: center; gap: 1.5vh; margin-bottom: 1.3vh; }
+  .bar-label { width: 30vh; font-size: 2vh; text-align: right; flex-shrink: 0; }
+  .bar-track { flex: 1; }
+  .bar {
+    background: var(--rh-red); color: #fff; font-size: 1.9vh; font-weight: 700;
+    padding: 0.5vh 1vh; white-space: nowrap; min-width: 4vh;
+  }
+  .bar.gray { background: var(--rh-gray); }
+  .bar.dark { background: var(--rh-black); border: 1px solid #555; }
+  .pill {
+    display: inline-block; border: 2px solid var(--rh-red); color: var(--rh-red);
+    font-weight: 700; font-size: 1.9vh; padding: 0.3vh 1.4vh; border-radius: 3vh;
+    margin-right: 1vh; margin-bottom: 1vh;
+  }
+  .dark .pill { border-color: var(--rh-red); color: #fff; background: var(--rh-red); }
+  .flow { display: flex; align-items: stretch; gap: 0; margin: 2.5vh 0; }
+  .flow .node {
+    flex: 1; border: 2px solid var(--rh-black); padding: 1.4vh; text-align: center;
+    font-size: 2vh; font-weight: 700; display: flex; flex-direction: column; justify-content: center;
+  }
+  .flow .node small { font-weight: 400; font-size: 1.7vh; color: var(--rh-gray); margin-top: 0.5vh; }
+  .flow .arrow { display: flex; align-items: center; padding: 0 1vh; font-size: 3vh; color: var(--rh-red); font-weight: 900; }
+  .checklist li::marker { content: "✔  "; color: var(--rh-red); }
+  .xlist li::marker { content: "✘  "; color: var(--rh-red); }
+  @media print {
+    @page { size: 338.7mm 190.5mm; margin: 0; }
+    html, body { overflow: visible; background: var(--rh-white); }
+    section.slide { display: flex !important; position: relative; height: 100vh; page-break-after: always; break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<section class="slide dark active">
+  <div class="grow">
+    <div class="kicker">llmpager v0.13.0</div>
+    <h1>One Trillion Parameters.<br>One 16-Gigabyte GPU.</h1>
+    <p class="sub" style="margin-top:2.5vh; font-size:2.8vh;">Kimi K2.6 — a 1T-parameter mixture-of-experts model —
+    generating coherent text on a consumer RTX 5060 Ti, with 571GB of experts streaming from NVMe.</p>
+    <p class="sub" style="margin-top:2vh;">Glenn West &nbsp;·&nbsp; August 2026</p>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>github.com/glennswest/llmpager</span><span class="counter"></span></div>
+</section>
+
+<section class="slide red-strip">
+  <h2>The <span class="accent">headline numbers</span></h2>
+  <div class="grow">
+    <div class="stat-row">
+      <div class="stat"><div class="hero-num">1T</div><div class="hero-label">total parameters (Kimi K2.6)</div></div>
+      <div class="stat"><div class="hero-num">571<span style="font-size:4vh">GB</span></div><div class="hero-label">of experts on NVMe</div></div>
+      <div class="stat"><div class="hero-num">16<span style="font-size:4vh">GB</span></div><div class="hero-label">of VRAM — 36× smaller</div></div>
+    </div>
+    <div class="stat-row">
+      <div class="stat"><div class="hero-num">829<span style="font-size:4vh">GB</span></div><div class="hero-label">streamed for the first 60 tokens</div></div>
+      <div class="stat"><div class="hero-num">2</div><div class="hero-label">days from git init to 1T tokens</div></div>
+      <div class="stat"><div class="hero-num">$429</div><div class="hero-label">the GPU's street price</div></div>
+    </div>
+    <div class="plain"><b>In plain terms:</b> the model is thirty-six times bigger than the card's memory. It runs anyway.</div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>Headline</span><span class="counter"></span></div>
+</section>
+
+<section class="slide">
+  <h2>Why this <span class="accent">shouldn't work</span></h2>
+  <div class="grow">
+    <ul>
+      <li>Conventional serving loads <b>every weight into GPU memory</b>. A 1T model at 4-bit needs ~570GB — that's seven H200s, roughly a quarter-million dollars of hardware.</li>
+      <li>CPU offload helps until the model outgrows RAM too. This box has 128GB — still 4.5× too small.</li>
+      <li>But a mixture-of-experts model has a secret: <b>each token only activates ~3% of the weights</b>. Kimi picks 8 of 384 experts per layer, per token.</li>
+    </ul>
+    <div class="plain"><b>The bet:</b> if the working set is small and skewed, treat the GPU like a CPU treats its cache —
+    and treat the SSD like memory. Classic virtual-memory paging, applied to a trillion parameters.</div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>The problem</span><span class="counter"></span></div>
+</section>
+
+<section class="slide red-strip">
+  <h2>The <span class="accent">architecture</span> (unchanged since day one)</h2>
+  <div class="grow">
+    <pre>
+ token ──► router (resident, VRAM)
+              │ top-8 expert ids, per layer
+              ▼
+        ExpertCache[layer] ──hit──► weights already in VRAM
+              │ miss
+              ▼
+        Pager: O_DIRECT read (NVMe) ──► host RAM tier ──► pinned ──► VRAM
+              <span class="c">io worker pool · CUDA events gate compute · LFU eviction</span></pre>
+    <ul>
+      <li>Resident core: attention, router, norms — plus the KV cache.</li>
+      <li>Experts live in a 4096-aligned pack on disk; the hot ones are cached in VRAM.</li>
+      <li>The same engine that runs Qwen3-30B at 41 tok/s runs Kimi at 1T — <b>only the scale changed</b>.</li>
+    </ul>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>Architecture</span><span class="counter"></span></div>
+</section>
+
+<section class="slide">
+  <h2>What Kimi <span class="accent">added to the problem</span></h2>
+  <div class="grow">
+    <table>
+      <tr><th>Dimension</th><th>Qwen3-30B-A3B</th><th>Kimi K2.6</th></tr>
+      <tr><td>Total / active parameters</td><td class="num">30B / 3B</td><td class="num">1T / 32B</td></tr>
+      <tr><td>Experts</td><td class="num">128 × 48 layers</td><td class="num">384 × 61 layers</td></tr>
+      <tr><td>Expert pack</td><td class="num">15.4 GB</td><td class="num">570.9 GB</td></tr>
+      <tr><td>Attention</td><td>GQA</td><td>MLA (latent, compressed)</td></tr>
+      <tr><td>Router</td><td>softmax top-k</td><td>sigmoid + bias correction</td></tr>
+      <tr><td>Extras</td><td>—</td><td>shared expert, dense first layer, YaRN 256K</td></tr>
+    </table>
+    <div class="plain"><b>MLA is the gift:</b> the whole KV state is 2.3KB per token — a quarter-million-token
+    context fits in half a gigabyte. The experts are the entire challenge.</div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>Kimi vs Qwen</span><span class="counter"></span></div>
+</section>
+
+<section class="slide">
+  <h2>MLA: attention through a <span class="accent">keyhole</span></h2>
+  <div class="grow">
+    <ul>
+      <li>DeepSeek-style latent attention compresses each token's K and V into one <b>576-float vector</b>, shared by all 64 heads.</li>
+      <li>Per-head keys and values are <b>never materialized</b> at decode: queries are absorbed through W<sub>kv</sub><sup>T</sup> once per token, outputs reconstructed after the softmax.</li>
+      <li>Cost per token: two small batched GEMVs + one MQA pass over the compressed cache.</li>
+    </ul>
+    <ul>
+      <li>The 13.4GB of bf16 attention weights get requantized to 4-bit at load — ~3.4GB in VRAM.</li>
+      <li>The 2.3GB embedding table is exiled to host RAM: one 28KB row gather per token.</li>
+      <li>What's left buys <b>4 expert cache slots per layer</b> — and that has to be enough.</li>
+    </ul>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>MLA</span><span class="counter"></span></div>
+</section>
+
+<section class="slide red-strip">
+  <h2>The pack: <span class="accent">repack, don't requantize</span></h2>
+  <div class="grow">
+    <ul>
+      <li>Moonshot ships K2.6 <b>quantization-aware-trained at int4</b>, group-32 — the weights are already 4-bit, and they were trained that way.</li>
+      <li>Our converter repacks them <b>bit-exactly</b> into the paging format: 23,040 expert blobs, 4096-aligned, a layer's 384 experts contiguous on disk.</li>
+      <li>568GB checkpoint → 570.9GB pack + 23.4GB core, in about 25 minutes.</li>
+    </ul>
+    <div class="plain"><b>Zero added quality loss:</b> the only conversion artifact is scale rounding — bf16 to f16,
+    under one percent, on the scales alone. Every weight bit is Moonshot's own.</div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>The pack</span><span class="counter"></span></div>
+</section>
+
+<section class="slide dark">
+  <h2>War story #1: the tokenizer <span class="accent">that lied</span></h2>
+  <div class="grow">
+    <ul>
+      <li>Kimi ships a <b>tiktoken</b> tokenizer — no <code>tokenizer.json</code> for standard Rust loaders.</li>
+      <li>Built one via the official converter, patched 256 special tokens with explicit ids…</li>
+      <li>…and found <code>tokenizer_config.json</code> disagrees with the model's own tokenizer about
+      <code>&lt;|im_middle|&gt;</code>: <b>163598 vs 163601</b>.</li>
+      <li>Trust the tokenizer, not the config. Verified byte-exact against the reference on every test string.</li>
+    </ul>
+    <div class="plain"><b>Lesson:</b> a wrong special-token id doesn't crash anything — it just quietly feeds the model
+    a different conversation format than it was trained on.</div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>War stories</span><span class="counter"></span></div>
+</section>
+
+<section class="slide dark">
+  <h2>War story #2: one sign bit, <span class="accent">570 gigabytes of blast radius</span></h2>
+  <div class="grow">
+    <pre>
+&gt; What is a mixture-of-experts model?
+<span class="r"> foss foss foss foss foss foss foss foss foss foss foss…</span></pre>
+    <ul>
+      <li>First full run: pipeline perfect — 61 layers, 727GB streamed — output garbage.</li>
+      <li>Root cause: compressed-tensors stores int4 as <b>offset-binary (value + 8)</b>, not two's complement. Every routed expert decoded as noise.</li>
+      <li>My unit test "passed" — it validated against my own wrong assumption.</li>
+      <li>Differential test against the official <code>unpack_from_int32</code> caught it in minutes. The fix made the repack a <b>verbatim nibble copy</b>.</li>
+    </ul>
+    <div class="plain"><b>Lesson:</b> never validate an encoder against your own decoder. Always diff against the reference implementation.</div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>War stories</span><span class="counter"></span></div>
+</section>
+
+<section class="slide red-strip">
+  <h2><span class="accent">First light</span> — August 8, 2026</h2>
+  <div class="grow">
+    <pre>
+&gt; What is a mixture-of-experts model? Answer in two sentences.
+
+<span class="g">Key points to cover:
+1. It's a machine learning architecture where multiple
+   specialized sub-models (experts) are combined.
+2. A gating network…</span></pre>
+    <div class="stat-row">
+      <div class="stat"><div class="hero-num">0.35</div><div class="hero-label">tok/s, stone-cold cache</div></div>
+      <div class="stat"><div class="hero-num">2.1%</div><div class="hero-label">expert cache hit rate</div></div>
+      <div class="stat"><div class="hero-num">829<span style="font-size:4vh">GB</span></div><div class="hero-label">streamed for 60 tokens</div></div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>First light</span><span class="counter"></span></div>
+</section>
+
+<section class="slide">
+  <h2>Was it <span class="accent">supposed to be that slow?</span></h2>
+  <div class="grow">
+    <ul>
+      <li>Yes — that's the <b>disk-bound floor</b>, predicted at 0.5–1.5 tok/s before a line of Kimi code existed.</li>
+      <li>Per token, worst case: 61 layers × 8 experts × 25MB ≈ <b>12GB of reads</b>. The disk does 7GB/s. Do the math.</li>
+      <li>VRAM caches only 244 of 23,040 experts (1%); at that hit rate, every token is mostly disk.</li>
+    </ul>
+    <table>
+      <tr><th>Lever (all shipped)</th><th class="num">Measured effect</th></tr>
+      <tr><td>Union prefill — fetch a chunk's experts once per layer</td><td class="num">prompt cost capped</td></tr>
+      <tr><td>f16 KV cache</td><td class="num">+14% decode, ½ memory</td></tr>
+      <tr><td>virtio iothreads at 25MB blobs</td><td class="num">3.6 → 6.94 GB/s</td></tr>
+      <tr><td>VM RAM 64 → 128GB</td><td class="num">enables the next slide</td></tr>
+    </table>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>The floor</span><span class="counter"></span></div>
+</section>
+
+<section class="slide red-strip">
+  <h2>The <span class="accent">RAM tier</span>: a second cache between VRAM and disk</h2>
+  <div class="grow">
+    <pre>
+ VRAM cache      244 experts    hit = free
+ RAM tier      3,200 experts    hit = ~2ms memcpy      <span class="g">← new</span>
+ NVMe pack    23,040 experts    miss = ~5ms contended read</pre>
+    <ul>
+      <li>80GB of host memory as a managed expert cache — frequency-aware admission and eviction, at expert granularity, not the page cache's blind 4KB LRU.</li>
+      <li>Every disk read write-allocates into the tier; hot experts stop touching the disk entirely.</li>
+      <li>13% of all experts fit — and routing is skewed, so effective hit rates run far higher.</li>
+    </ul>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>RAM tier</span><span class="counter"></span></div>
+</section>
+
+<section class="slide">
+  <h2>One engine, <span class="accent">one API</span>, three model classes</h2>
+  <div class="grow">
+    <table>
+      <tr><th>Model</th><th class="num">Weights</th><th class="num">Speed</th><th>Role</th></tr>
+      <tr><td>Qwen3-30B-A3B</td><td class="num">18.5 GB</td><td class="num">41 tok/s</td><td>interactive chat</td></tr>
+      <tr><td>Qwen3-Coder-30B</td><td class="num">18.5 GB</td><td class="num">41 tok/s</td><td>interactive coding</td></tr>
+      <tr><td>Kimi K2.6 (1T)</td><td class="num">594 GB</td><td class="num">~1 tok/s</td><td>overnight agents, batch</td></tr>
+    </table>
+    <ul>
+      <li>All three registered in one OpenAI-compatible server; request <code>"model": "kimi-k2.6"</code> and the registry swaps VRAM budgets automatically.</li>
+      <li>Temperature, top-p, streaming, chat templates — per architecture, transparently.</li>
+    </ul>
+    <div class="plain"><b>In plain terms:</b> the same box answers chat questions at reading speed, and thinks with a
+    trillion-parameter model while you sleep.</div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>Serving</span><span class="counter"></span></div>
+</section>
+
+<section class="slide">
+  <h2>What's <span class="accent">next</span></h2>
+  <div class="grow">
+    <ul>
+      <li><b>Batched decode</b> — N agent streams share every expert fetch; aggregate throughput scales almost linearly at first.</li>
+      <li><b>Profiled pre-warm</b> — measure which experts your workload actually uses; preload the RAM tier before the first token.</li>
+      <li><b>Global VRAM slot pool</b> — let layers compete for cache instead of splitting it evenly.</li>
+      <li><b>Entropy-coded packs</b> — QAT int4 isn't uniform; 10–20% smaller is 10–20% faster when the disk is the wall.</li>
+    </ul>
+    <div class="plain"><b>The trajectory:</b> 0.35 tok/s was first light. The measured levers above target 2+ tok/s
+    single-stream, and multiples of that for batched agent workloads.</div>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>Roadmap</span><span class="counter"></span></div>
+</section>
+
+<section class="slide dark">
+  <div class="grow">
+    <div class="kicker">llmpager</div>
+    <h1>Model size is now a <span style="color:var(--rh-red)">disk-space problem</span>.<br>Not a GPU-budget problem.</h1>
+    <p class="sub" style="margin-top:2.5vh; font-size:2.6vh;">Apache-2.0 · Rust · CUDA · github.com/glennswest/llmpager</p>
+    <p class="sub" style="margin-top:1vh; font-size:2.2vh;">Standing on the shoulders of turbo-fieldfare — thanks for the idea that started this.</p>
+  </div>
+  <div class="footer"><span class="brandmark">llmpager</span><span>Thank you</span><span class="counter"></span></div>
+</section>
+</div>
+<script>
+  const slides = Array.from(document.querySelectorAll("section.slide"));
+  let cur = Math.min(Math.max(parseInt(location.hash.slice(1) || "1", 10) - 1 || 0, 0), slides.length - 1);
+  function show(i) {
+    cur = Math.min(Math.max(i, 0), slides.length - 1);
+    slides.forEach((s, j) => s.classList.toggle("active", j === cur));
+    document.querySelectorAll(".counter").forEach(c => c.textContent = (cur + 1) + " / " + slides.length);
+    history.replaceState(null, "", "#" + (cur + 1));
+  }
+  addEventListener("keydown", e => {
+    if (["ArrowRight", "PageDown", " "].includes(e.key)) { show(cur + 1); e.preventDefault(); }
+    else if (["ArrowLeft", "PageUp"].includes(e.key)) { show(cur - 1); e.preventDefault(); }
+    else if (e.key === "Home") show(0);
+    else if (e.key === "End") show(slides.length - 1);
+  });
+  addEventListener("click", e => {
+    if (e.clientX > innerWidth * 0.75) show(cur + 1);
+    else if (e.clientX < innerWidth * 0.25) show(cur - 1);
+  });
+  show(cur);
+</script>
+</body>
+</html>
