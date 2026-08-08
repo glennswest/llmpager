@@ -200,12 +200,11 @@ reorganization; 4 is a measured quality/VRAM trade; 5-7 are further out.
 Already optimal, do not touch: bit-exact int4 QAT repack, 4096-aligned
 blobs, layer-major pack ordering (union prefill reads a layer as one
 near-sequential ~9.6GB sweep), uniform blob size (no slot fragmentation).
-- [ ] 1. Managed RAM tier (biggest win): Kimi's 600GB pack >> 128GB RAM,
-      so O_DIRECT leaves it with NO RAM cache today. Add an explicit
-      middle tier in the pager: ~100GB pinned host LFU (~4,100 experts,
-      17% of 23K) with frequency-based admission/eviction; RAM hit =
-      ~1-2ms pinned H2D vs ~4-6ms disk read. Expected combined VRAM+RAM
-      hit 40-70% under routing skew => plausibly 2-3x Kimi decode.
+- [x] 1. Managed RAM tier (v0.14.0): anonymous NORESERVE mapping +
+      global-pool LFU bookkeeping, read-through in the io workers,
+      write-allocate on disk reads; --ram-gb / serve ram_gb (kimi 80GB
+      = ~3,200 experts). First 120-token run: 0.35 -> 0.57 tok/s (+63%)
+      with the tier still cold; converges higher on long runs.
 - [ ] 2. Global VRAM slot pool: replace per-layer slot arrays with one
       aged-LFU pool keyed (layer, expert) — uniform blob size means any
       slot fits any expert; layers with high routing entropy naturally

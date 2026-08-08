@@ -17,6 +17,18 @@ Output is coherent and on-topic. At a 2.1% hit rate this is the
 disk-bound floor; the M8 RAM tier (~17% of experts in host RAM) and
 profiling-driven pre-warm are the planned levers toward 1-2 tok/s.
 
+### + 80GB managed RAM tier (same day)
+
+| Config | Decode | Notes |
+|---|---|---|
+| No tier (baseline) | 0.35 tok/s | 60 tokens |
+| --ram-gb=80, first run | **0.57 tok/s** (+63%) | 120 tokens, tier still warming |
+
+The tier held ~3,200 experts (13%) by run end; every disk read
+write-allocates, so steady-state agent workloads keep climbing toward
+the 1-2 tok/s target. (The test prompt asked the model to explain
+virtual memory paging. It did, correctly, while running on it.)
+
 ## M0 — 2026-08-06, ai.g8.lo
 
 Hardware: RTX 5060 Ti 16GB (vfio passthrough), 12 vCPU, 64GB RAM, virtio-scsi

@@ -196,5 +196,13 @@ fn main() -> Result<()> {
         100.0 * m.hit_rate(),
         m.bytes_fetched as f64 / 1e9,
     );
+    if m.ram_hits > 0 {
+        eprintln!(
+            "ram tier: {} hits of {} fetches ({:.1}%)",
+            m.ram_hits,
+            m.fetches,
+            100.0 * m.ram_hits as f64 / m.fetches.max(1) as f64
+        );
+    }
     Ok(())
 }

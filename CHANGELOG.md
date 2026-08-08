@@ -231,3 +231,5 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **docs:** M8 milestone — data density & memory organization plan (RAM tier, global slot pool, f16 MLA state, fp8 core A/B, entropy-coded pack, phase split, cold tier)
 - **feat:** Kimi K2.6 pack + core converted on ai.g8.lo (570.9GB pack, 23.4GB core, 20min); tokenizer.json built from tiktoken via TikTokenConverter with special-id patch (config vs tokenizer mismatch on im_middle found and fixed); byte-exact vs reference
 - **feat:** FIRST REAL KIMI TOKENS — 1T-param Kimi K2.6 decodes coherently on the RTX 5060 Ti (0.35 tok/s cold, 829GB streamed); int4 offset-binary fix was the final bug
+- **feat:** M8-1 RAM tier shipped and measured: Kimi 0.35 -> 0.57 tok/s (+63%) on the first still-cold run
+- **docs:** Kimi milestone presentation (kimi.html, 15 slides + narration)
