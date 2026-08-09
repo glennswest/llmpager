@@ -217,6 +217,8 @@ pub struct Pager {
     cuda: Arc<Cuda>,
     shared: Arc<Shared>,
     index: PackReader,
+    pack_path: PathBuf,
+    direct: bool,
     tx: Option<Sender<Job>>,
     workers: Vec<std::thread::JoinHandle<()>>,
     arenas: Vec<CUdeviceptr>,
@@ -290,7 +292,16 @@ impl Pager {
             }));
         }
 
-        Ok(Self { cuda, shared, index, tx: Some(tx), workers, arenas })
+        Ok(Self {
+            cuda,
+            shared,
+            index,
+            pack_path: pack.to_path_buf(),
+            direct: cfg.direct,
+            tx: Some(tx),
+            workers,
+            arenas,
+        })
     }
 
     /// Acquire pinned handles for `experts` of `layer`, dispatching fetches
@@ -412,11 +423,12 @@ impl Pager {
         let mut idxs: Vec<usize> = ranked.into_iter().map(|(_, i)| i).collect();
         idxs.sort_unstable();
 
+        let mut reader = open_reader(&self.pack_path, self.direct)?;
         let mut buf = llmpager_core::pack::AlignedBuf::new(self.shared.span);
         let mut loaded = 0usize;
         for i in idxs {
             let (layer, expert) = ((i / epl) as u16, (i % epl) as u16);
-            self.index.read_blob_into(layer, expert, buf.as_mut())?;
+            reader.read_blob_into(layer, expert, buf.as_mut())?;
             ram.put(layer, expert, &buf.as_ref()[..self.shared.span]);
             loaded += 1;
         }
@@ -511,7 +523,7 @@ fn worker(
     direct: bool,
 ) -> Result<()> {
     cuda.bind_thread()?;
-    let reader = open_reader(pack, direct)?;
+    let mut reader = open_reader(pack, direct)?;
     let mut pin = cuda.alloc_pinned(shared.span)?;
     let stream = cuda.stream()?;
 

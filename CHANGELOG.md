@@ -271,3 +271,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **docs:** YouTube upload kit for the Kimi video — 2 thumbnails (JPG+PNG+source) and writeup with chapters
 - **feat:** M7-4 complete — batched decode both engines + serve batch API; Qwen batch-2 1.94x aggregate; expert dropping free at 0.05 (kimi default); eager-release deadlock fixed
 - **docs:** pre-warm measured neutral on Kimi (capacity-bound); expert-drop 0.05 is a post-scaling no-op — honest findings recorded, M7 closed
+- **feat:** zstd-compressed packs (M8-5): per-blob frames, transparent CPU decompress in io workers (disk is the wall, not H2D); measured entropy ceiling 13.2%, zstd hits it

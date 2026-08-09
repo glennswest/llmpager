@@ -37,6 +37,18 @@ pub struct PackMeta {
     /// top-k, ...). Free-form JSON; absent in early packs.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub config: serde_json::Value,
+    /// Per-blob compression ("zstd") — blobs are stored as zstd frames;
+    /// readers decompress transparently. None/absent = raw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<String>,
+    /// Largest raw (decompressed) blob; sizes fetch buffers when the
+    /// index holds compressed lengths. 0 in uncompressed packs.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_raw_blob: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -69,6 +81,12 @@ impl PackWriter {
         // Header + index are back-filled in finish(); reserve the space.
         file.seek(SeekFrom::Start(index_end))?;
         Ok(Self { file, meta, index: Vec::with_capacity(total as usize), index_end, cursor: index_end })
+    }
+
+    /// Record the raw length of a blob stored compressed (keeps
+    /// `max_raw_blob` correct for buffer sizing).
+    pub fn note_raw_len(&mut self, raw_len: usize) {
+        self.meta.max_raw_blob = self.meta.max_raw_blob.max(raw_len as u64);
     }
 
     /// Append the next expert's blob. Call exactly layers*experts times, in
@@ -127,6 +145,9 @@ pub struct PackReader {
     meta: PackMeta,
     index: Vec<IndexEntry>,
     direct: bool,
+    /// Scratch for compressed reads (lazily sized to the largest
+    /// compressed span).
+    scratch: Option<AlignedBuf>,
 }
 
 impl PackReader {
@@ -169,7 +190,7 @@ impl PackReader {
                 nbytes: u64::from_le_bytes(raw[i * 16 + 8..i * 16 + 16].try_into().unwrap()),
             })
             .collect();
-        Ok(Self { file, meta, index, direct })
+        Ok(Self { file, meta, index, direct, scratch: None })
     }
 
     pub fn meta(&self) -> &PackMeta {
@@ -180,8 +201,17 @@ impl PackReader {
         self.index[layer as usize * self.meta.experts_per_layer as usize + expert as usize]
     }
 
-    /// Largest blob in the pack — sizes fetch buffers.
+    /// Largest raw blob in the pack — sizes fetch buffers. For compressed
+    /// packs the index holds compressed lengths, so the recorded raw max
+    /// takes precedence.
     pub fn max_blob_bytes(&self) -> u64 {
+        if self.meta.max_raw_blob > 0 {
+            return self.meta.max_raw_blob;
+        }
+        self.index.iter().map(|e| e.nbytes).max().unwrap_or(0)
+    }
+
+    fn max_stored_bytes(&self) -> u64 {
         self.index.iter().map(|e| e.nbytes).max().unwrap_or(0)
     }
 
@@ -190,20 +220,33 @@ impl PackReader {
     /// `buf` must hold at least `align_up(entry.nbytes)` bytes and, when the
     /// pack was opened with O_DIRECT, must be 4096-aligned (use [`AlignedBuf`]
     /// or pinned buffers allocated with aligned allocators).
-    pub fn read_blob_into(&self, layer: u16, expert: u16, buf: &mut [u8]) -> Result<usize> {
+    pub fn read_blob_into(&mut self, layer: u16, expert: u16, buf: &mut [u8]) -> Result<usize> {
         let e = self.entry(layer, expert);
         let span = align_up(e.nbytes) as usize;
-        if buf.len() < span {
-            bail!("buffer too small: {} < {span}", buf.len());
-        }
-        if self.direct {
-            let addr = buf.as_ptr() as usize;
-            if addr % ALIGN as usize != 0 {
-                bail!("O_DIRECT read requires a 4096-aligned buffer");
+        if self.meta.compression.is_none() {
+            if buf.len() < span {
+                bail!("buffer too small: {} < {span}", buf.len());
             }
+            if self.direct {
+                let addr = buf.as_ptr() as usize;
+                if addr % ALIGN as usize != 0 {
+                    bail!("O_DIRECT read requires a 4096-aligned buffer");
+                }
+            }
+            pread_full(&self.file, &mut buf[..span], e.offset)?;
+            return Ok(e.nbytes as usize);
         }
-        pread_full(&self.file, &mut buf[..span], e.offset)?;
-        Ok(e.nbytes as usize)
+        // Compressed pack: aligned read of the frame into scratch, then
+        // decompress straight into the caller's buffer (pinned in the
+        // pager path — no extra copy).
+        if self.scratch.is_none() {
+            self.scratch = Some(AlignedBuf::new(align_up(self.max_stored_bytes()) as usize));
+        }
+        let scratch = self.scratch.as_mut().unwrap();
+        pread_full(&self.file, &mut scratch.as_mut()[..span], e.offset)?;
+        let n = zstd::bulk::Decompressor::new()?
+            .decompress_to_buffer(&scratch.as_ref()[..e.nbytes as usize], buf)?;
+        Ok(n)
     }
 }
 
@@ -300,6 +343,8 @@ mod tests {
             experts_per_layer: 4,
             dtype: "q4_gs64".into(),
             config: serde_json::Value::Null,
+            compression: None,
+            max_raw_blob: 0,
         };
         let mut w = PackWriter::create(&path, meta.clone())?;
         for l in 0..3u16 {
@@ -310,7 +355,7 @@ mod tests {
         }
         w.finish()?;
 
-        let r = PackReader::open(&path)?;
+        let mut r = PackReader::open(&path)?;
         assert_eq!(r.meta(), &meta);
         for l in 0..3u16 {
             for e in 0..4u16 {
@@ -336,6 +381,8 @@ mod tests {
             experts_per_layer: 2,
             dtype: "raw".into(),
             config: serde_json::Value::Null,
+            compression: None,
+            max_raw_blob: 0,
         };
         let mut w = PackWriter::create(&path, meta)?;
         w.add_blob(&[1, 2, 3])?;
@@ -354,6 +401,8 @@ mod tests {
             experts_per_layer: 1,
             dtype: "raw".into(),
             config: serde_json::Value::Null,
+            compression: None,
+            max_raw_blob: 0,
         };
         let mut w = PackWriter::create(&path, meta)?;
         let want = blob_for(0, 0, 8192);
@@ -361,7 +410,7 @@ mod tests {
         w.finish()?;
         // O_DIRECT can fail on exotic filesystems (tmpfs); fall back quietly
         // so CI stays green — the real target runs ext4.
-        let r = match PackReader::open_direct(&path) {
+        let mut r = match PackReader::open_direct(&path) {
             Ok(r) => r,
             Err(_) => return Ok(()),
         };

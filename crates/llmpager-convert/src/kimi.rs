@@ -46,7 +46,12 @@ fn parse_expert_packed(name: &str) -> Option<(u16, u16, usize)> {
     Some((layer.parse().ok()?, expert.parse().ok()?, proj))
 }
 
-pub fn convert_kimi(model_dir: &Path, out_pack: &Path, out_core: &Path) -> Result<ConvertReport> {
+pub fn convert_kimi(
+    model_dir: &Path,
+    out_pack: &Path,
+    out_core: &Path,
+    compress: bool,
+) -> Result<ConvertReport> {
     let ckpt = Checkpoint::open(model_dir)?;
     let text = ckpt.config["text_config"].clone();
     if text.is_null() {
@@ -94,6 +99,8 @@ pub fn convert_kimi(model_dir: &Path, out_pack: &Path, out_core: &Path) -> Resul
         experts_per_layer: experts,
         dtype: "q4g32-gud".into(),
         config: cfg,
+        compression: if compress { Some("zstd".into()) } else { None },
+        max_raw_blob: 0,
     };
     let mut writer = PackWriter::create(out_pack, meta)?;
     let mut max_scale_err = 0.0f32;
@@ -112,7 +119,13 @@ pub fn convert_kimi(model_dir: &Path, out_pack: &Path, out_core: &Path) -> Resul
         for b in blobs {
             let (blob, serr) = b?;
             max_scale_err = max_scale_err.max(serr);
-            writer.add_blob(&blob)?;
+            if compress {
+                writer.note_raw_len(blob.len());
+                let framed = zstd::bulk::compress(&blob, 3)?;
+                writer.add_blob(&framed)?;
+            } else {
+                writer.add_blob(&blob)?;
+            }
         }
     }
     writer.finish()?;
@@ -275,7 +288,7 @@ pub fn write_test_checkpoint_kimi(dir: &Path) -> Result<()> {
         rng ^= rng << 17;
         rng
     };
-    let mut add = |name: String,
+    let add = |name: String,
                    dtype: &str,
                    shape: Vec<usize>,
                    bytes: Vec<u8>,
@@ -288,7 +301,7 @@ pub fn write_test_checkpoint_kimi(dir: &Path) -> Result<()> {
             serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [start, start + bytes.len()]}),
         );
     };
-    let mut bf16v = |n: usize, next: &mut dyn FnMut() -> u64| -> Vec<u8> {
+    let bf16v = |n: usize, next: &mut dyn FnMut() -> u64| -> Vec<u8> {
         (0..n)
             .flat_map(|_| {
                 f32_to_bf16(((next() % 2000) as f32 / 1000.0 - 1.0) * 0.15).to_le_bytes()
@@ -296,7 +309,7 @@ pub fn write_test_checkpoint_kimi(dir: &Path) -> Result<()> {
             .collect()
     };
 
-    let mut bf16 = |name: String, shape: Vec<usize>, header: &mut serde_json::Map<String, serde_json::Value>, data: &mut Vec<u8>, next: &mut dyn FnMut() -> u64| {
+    let bf16 = |name: String, shape: Vec<usize>, header: &mut serde_json::Map<String, serde_json::Value>, data: &mut Vec<u8>, next: &mut dyn FnMut() -> u64| {
         let n: usize = shape.iter().product();
         let bytes = bf16v(n, next);
         add(name, "BF16", shape, bytes, header, data);
@@ -494,10 +507,35 @@ mod tests {
             dir.path(),
             &dir.path().join("k.llmpk"),
             &dir.path().join("k.core.safetensors"),
+            false,
         )?;
         assert_eq!((report.layers, report.experts), (2, 8));
         let r = PackReader::open(&dir.path().join("k.llmpk"))?;
         assert_eq!(r.meta().config["kv_lora_rank"], 64);
+        Ok(())
+    }
+
+    #[test]
+    fn compressed_pack_round_trips() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        write_test_checkpoint_kimi(dir.path())?;
+        let pack = dir.path().join("c.llmpk");
+        let report =
+            convert_kimi(dir.path(), &pack, &dir.path().join("c.core.safetensors"), true)?;
+        let mut r = PackReader::open(&pack)?;
+        assert_eq!(r.meta().compression.as_deref(), Some("zstd"));
+        assert!(r.meta().max_raw_blob > 0);
+        // Raw span from max_raw_blob, not the (smaller) compressed index.
+        let span = (r.max_blob_bytes() as usize).div_ceil(4096) * 4096;
+        let mut buf = vec![0u8; span];
+        let n = r.read_blob_into(1, 2, &mut buf)?;
+        let (rows, cols) = (
+            u32::from_le_bytes(buf[0..4].try_into()?) as usize,
+            u32::from_le_bytes(buf[4..8].try_into()?) as usize,
+        );
+        let group = u32::from_le_bytes(buf[24..28].try_into()?) as usize;
+        assert_eq!(n, BLOB_HEADER_BYTES + 2 * q4_bytes(rows, cols, group) + q4_bytes(cols, rows, group));
+        let _ = report;
         Ok(())
     }
 
@@ -507,12 +545,12 @@ mod tests {
         write_kimi_checkpoint(dir.path())?;
         let pack_path: PathBuf = dir.path().join("k.llmpk");
         let core_path: PathBuf = dir.path().join("k.core.safetensors");
-        let report = convert_kimi(dir.path(), &pack_path, &core_path)?;
+        let report = convert_kimi(dir.path(), &pack_path, &core_path, false)?;
         assert_eq!((report.layers, report.experts), (2, 2)); // 3 layers - 1 dense
         assert_eq!(report.core_tensors, 3); // embed + dense gate + shared gate
         assert!(report.max_quant_err < 0.005, "scale err {}", report.max_quant_err);
 
-        let r = PackReader::open(&pack_path)?;
+        let mut r = PackReader::open(&pack_path)?;
         assert_eq!(r.meta().dtype, "q4g32-gud");
         assert_eq!(r.meta().config["moe_layer_offset"], 1);
 

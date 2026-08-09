@@ -158,6 +158,8 @@ fn gen(f: &Flags) -> Result<()> {
         experts_per_layer: experts,
         dtype: "raw".into(),
         config: serde_json::Value::Null,
+        compression: None,
+        max_raw_blob: 0,
     };
     let mut w = PackWriter::create(&path, meta).context("creating pack")?;
     // Patterned, compressible-hostile filler; content is irrelevant to I/O.
@@ -213,6 +215,7 @@ fn disk(f: &Flags) -> Result<()> {
             let bytes = &bytes;
             let meta = &meta;
             handles.push(s.spawn(move || -> Result<()> {
+                let mut reader = reader;
                 let mut rng = Rng::new(0x9e3779b97f4a7c15 ^ t as u64);
                 let mut buf = AlignedBuf::new(span as usize);
                 loop {

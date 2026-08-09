@@ -163,7 +163,8 @@ pub fn convert(model_dir: &Path, out_pack: &Path, out_core: &Path) -> Result<Con
             &std::fs::read(model_dir.join("config.json")).context("reading config.json")?,
         )?;
         if config["model_type"].as_str() == Some("kimi_k25") || !config["text_config"].is_null() {
-            return kimi::convert_kimi(model_dir, out_pack, out_core);
+            let compress = std::env::var("LLMPAGER_COMPRESS").as_deref() == Ok("zstd");
+            return kimi::convert_kimi(model_dir, out_pack, out_core, compress);
         }
     }
 
@@ -199,6 +200,8 @@ pub fn convert(model_dir: &Path, out_pack: &Path, out_core: &Path) -> Result<Con
         experts_per_layer: experts,
         dtype: "q4g64-gud".into(),
         config: ckpt.config.clone(),
+        compression: None,
+        max_raw_blob: 0,
     };
     let mut writer = PackWriter::create(out_pack, meta)?;
     let mut max_err = 0.0f32;
@@ -441,7 +444,7 @@ mod tests {
         assert!(report.max_quant_err < 0.05 / 14.0 * 1.2);
 
         // Pack sanity + dequant round-trip for one expert's gate_proj.
-        let r = PackReader::open(&pack_path)?;
+        let mut r = PackReader::open(&pack_path)?;
         assert_eq!(r.meta().dtype, "q4g64-gud");
         assert_eq!(r.meta().config["hidden_size"], 128);
         let entry = r.entry(1, 2);
