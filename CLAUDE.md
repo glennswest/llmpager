@@ -195,11 +195,9 @@ Approved 2026-08-08: items 1-5.
           union machinery with per-slot KV caches and per-entry seq_len
           in attention (grid.y = entry),
       (c) serve: OpenAI prompt-array / n>1 requests decode in lockstep.
-- [x] 5. Profiling + pre-warm shipped (v0.15.x) — measured NEUTRAL on
-      Kimi (capacity binds: ~15-20k unique experts vs 3,200 tier slots;
-      organic warming reaches the same 44.2% hit). Kept for short
-      requests + serving self-profiles. Expert dropping re-read: 0.05
-      is a no-op post-scaling; not a Kimi lever. GPU router top-k:
+- [x] 5. Profiling + pre-warm shipped; first A/B RETRACTED (ran on a
+      stale box binary that ignored the flags — fail-loud deploy.sh
+      added). Real A/B rerunning in the zstd chain. GPU router top-k:
       skipped — irrelevant at disk-bound speeds.
 
 ### M8 — Data density & memory organization (planned 2026-08-08)

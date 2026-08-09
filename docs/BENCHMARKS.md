@@ -1,6 +1,16 @@
 # Benchmarks
 
-## M8 pre-warm + expert dropping: honest findings — 2026-08-09
+## M8 pre-warm + expert dropping — 2026-08-09 (RETRACTED, see below)
+
+**RETRACTION**: these runs executed on a stale binary (a silently failed
+git pull on the box); the old binary ignored --prewarm/--profile-out and
+min-expert-weight entirely, so the A/B compared identical runs. The
+box now has a fail-loud deploy script. Correct numbers follow from the
+2026-08-09 rerun (zstd-pack chain). The expert-dropping *threshold*
+analysis (0.05 rarely triggers post-scaling) still holds from the PPL
+sweep, which did run on a current binary.
+
+## (retracted) M8 pre-warm + expert dropping — 2026-08-09
 
 Kimi, 120-token generation, 80GB RAM tier, identical prompt A/B:
 
