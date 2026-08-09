@@ -1,5 +1,28 @@
 # Changelog
 
+## [v0.15.0] — 2026-08-09
+
+M7-4 complete: lockstep batched decode.
+
+### Added
+- step_multi on both engines: (token, position, sequence-slot) entries,
+  per-slot KV regions, per-layer expert unions across all streams;
+  prefill and batch decode are one code path
+- Serve batch API: OpenAI prompt-array / n>1 completions with
+  per-stream sampling and aggregate tok/s reporting
+- --batch / --batch-selftest CLI; serve per-model batch +
+  min_expert_weight config (kimi: batch 2, drop at 0.05)
+
+### Measured
+- Qwen3-30B batch 2: 47.3 tok/s aggregate (1.94x, 97% efficiency);
+  batch 4: 56.7 (2.32x). Streams bit-identical at every size.
+- Expert dropping at 0.05: +0.10% PPL (noise) — enabled for kimi
+
+### Fixed
+- Mixed eager/deferred expert release deadlock (hung under expert
+  dropping); kimi releases eagerly everywhere
+- Sampled batch first-token drawn per stream prefill
+
 ## [v0.14.0] — 2026-08-08
 
 ### Added
