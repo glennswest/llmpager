@@ -1019,6 +1019,7 @@ impl KimiDecoder {
         f32_from_le(&self.logits_host)
     }
 
+    #[allow(dead_code)] // eager-release everywhere now; kept for symmetry
     fn defer_release(&mut self, handles: Vec<ExpertHandle>) -> Result<()> {
         while let Some((ev_idx, _)) = self.pending_release.front() {
             if self.cuda.event_done(self.release_events[*ev_idx])? {
