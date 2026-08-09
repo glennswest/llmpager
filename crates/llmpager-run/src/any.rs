@@ -26,15 +26,17 @@ impl AnyDecoder {
         core_q4: bool,
         direct: bool,
         ram_bytes: u64,
+        batch: usize,
     ) -> Result<Self> {
         let meta = llmpager_core::pack::PackReader::open(pack)?.meta().clone();
         if kimi::KimiConfig::is_kimi(&meta.config) {
+            let _ = batch; // kimi batching lands after the qwen path proves out
             Ok(AnyDecoder::Kimi(kimi::KimiDecoder::new(
                 pack, core, slots, io_threads, max_seq, direct, ram_bytes,
             )?))
         } else {
             Ok(AnyDecoder::Qwen(decode::Decoder::new(
-                pack, core, slots, io_threads, max_seq, core_q4, direct, ram_bytes,
+                pack, core, slots, io_threads, max_seq, core_q4, direct, ram_bytes, batch,
             )?))
         }
     }
@@ -54,6 +56,18 @@ impl AnyDecoder {
         match self {
             AnyDecoder::Qwen(d) => d.step_chunk(tokens, start_pos, want_logits),
             AnyDecoder::Kimi(d) => d.step_chunk(tokens, start_pos, want_logits),
+        }
+    }
+
+    /// Multi-entry step (batch decode); Qwen engine only for now.
+    pub fn step_multi(
+        &mut self,
+        entries: &[(u32, usize, usize)],
+        want_logits: bool,
+    ) -> Result<Vec<u32>> {
+        match self {
+            AnyDecoder::Qwen(d) => d.step_multi(entries, want_logits),
+            AnyDecoder::Kimi(_) => anyhow::bail!("batched decode not yet wired for kimi"),
         }
     }
 

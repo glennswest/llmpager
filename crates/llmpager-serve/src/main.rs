@@ -38,6 +38,7 @@ struct ModelSpec {
     /// Managed host-RAM expert tier (GB); for packs larger than RAM.
     ram_gb: f64,
     max_seq: usize,
+    batch: usize,
 }
 
 struct Engine {
@@ -111,7 +112,7 @@ impl Registry {
                 .map_err(|e| anyhow::anyhow!("loading {}: {e}", tok_file.display()))?;
             let dec = AnyDecoder::new(
                 &spec.pack, &spec.core, slots, spec.io_threads, spec.max_seq,
-                false, spec.direct, (spec.ram_gb * 1e9) as u64,
+                false, spec.direct, (spec.ram_gb * 1e9) as u64, spec.batch,
             )?;
             Ok(Engine { dec, tok, cur_slots: slots, max_seq: spec.max_seq })
         };
@@ -309,6 +310,7 @@ fn main() -> Result<()> {
                 direct: m["direct"].as_bool().unwrap_or(false),
                 ram_gb: m["ram_gb"].as_f64().unwrap_or(0.0),
                 max_seq: m["max_seq"].as_u64().unwrap_or(4096) as usize,
+                batch: m["batch"].as_u64().unwrap_or(1) as usize,
             })
         })
         .collect::<Result<_>>()?;

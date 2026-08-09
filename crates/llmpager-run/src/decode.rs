@@ -80,6 +80,9 @@ pub struct Decoder {
     expert_group: i32,
     /// KV cache stored f16 (default; halves KV VRAM) or f32.
     kv_f16: bool,
+    /// Concurrent sequence slots (lockstep batch decode). KV caches hold
+    /// `batch_cap` independent regions per layer.
+    batch_cap: usize,
     // Chunked-prefill buffers: whole-chunk hidden states + router logits.
     chunk_cap: usize,
     h_buf: CUdeviceptr,      // [chunk_cap, hidden]
@@ -88,6 +91,7 @@ pub struct Decoder {
     router_chunk_host: Vec<u8>,
     logits_host: Vec<u8>,
     router_host: Vec<u8>,
+    logits_multi: Vec<Vec<f32>>,
     // Deferred expert-handle release: handles stay pinned until the compute
     // stream passes the recorded event, so no per-layer sync is needed.
     release_events: Vec<llmpager_cuda::driver::CUevent>,
@@ -105,7 +109,9 @@ impl Decoder {
         core_q4: bool,
         direct: bool,
         ram_bytes: u64,
+        batch_cap: usize,
     ) -> Result<Self> {
+        let batch_cap = batch_cap.max(1);
         let meta = PackReader::open(pack_path)?.meta().clone();
         let cfg = Config::from_json(&meta.config)?;
         let expert_group: i32 = match meta.dtype.as_str() {
@@ -139,7 +145,8 @@ impl Decoder {
         let kvd = cfg.kv_heads * cfg.head_dim;
         // f16 KV default; LLMPAGER_KV_F32=1 restores f32 (A/B, debugging).
         let kv_f16 = std::env::var("LLMPAGER_KV_F32").is_err();
-        let kv_bytes = cfg.kv_heads * max_seq * cfg.head_dim * if kv_f16 { 2 } else { 4 };
+        let kv_bytes =
+            batch_cap * cfg.kv_heads * max_seq * cfg.head_dim * if kv_f16 { 2 } else { 4 };
         let mut kcache = Vec::with_capacity(cfg.layers);
         let mut vcache = Vec::with_capacity(cfg.layers);
         for _ in 0..cfg.layers {
@@ -174,6 +181,7 @@ impl Decoder {
             down_off: 32 + 2 * gate_bytes,
             expert_group,
             kv_f16,
+            batch_cap,
             chunk_cap,
             h_buf: f(chunk_cap * cfg.hidden)?,
             hn_buf: f(chunk_cap * cfg.hidden)?,
@@ -181,6 +189,7 @@ impl Decoder {
             router_chunk_host: vec![0u8; chunk_cap * cfg.experts * 4],
             logits_host: vec![0u8; cfg.vocab * 4],
             router_host: vec![0u8; cfg.experts * 4],
+            logits_multi: Vec::new(),
             release_events: (0..8).map(|_| cuda.event()).collect::<Result<_>>()?,
             pending_release: std::collections::VecDeque::new(),
             next_event: 0,
@@ -329,22 +338,42 @@ impl Decoder {
     }
 
     /// Union prefill: run `tokens` (≤ chunk_cap) through all layers as one
-    /// chunk. Attention stays token-by-token (causal), but each layer's
-    /// routed experts are fetched once as the union over the whole chunk,
-    /// in waves small enough to never pin the entire cache. Returns the
-    /// greedy argmax of the last token when `want_logits`.
+    /// chunk on sequence slot 0. Returns the greedy argmax of the last
+    /// token when `want_logits`.
     pub fn step_chunk(
         &mut self,
         tokens: &[u32],
         start_pos: usize,
         want_logits: bool,
     ) -> Result<u32> {
-        let n = tokens.len();
+        let entries: Vec<(u32, usize, usize)> =
+            tokens.iter().enumerate().map(|(i, t)| (*t, start_pos + i, 0)).collect();
+        let out = self.step_multi(&entries, want_logits)?;
+        Ok(out.last().copied().unwrap_or(0))
+    }
+
+    /// General multi-token step: each entry is (token, position, sequence
+    /// slot). Within one call, entries on the same slot must be in
+    /// ascending position order (prefill); entries on distinct slots are
+    /// independent streams decoding in lockstep (batch). Every layer
+    /// fetches the union of all entries' experts once, in waves. Returns
+    /// the greedy argmax per entry when `want_logits` (else zeros).
+    pub fn step_multi(
+        &mut self,
+        entries: &[(u32, usize, usize)],
+        want_logits: bool,
+    ) -> Result<Vec<u32>> {
+        let n = entries.len();
         if n == 0 || n > self.chunk_cap {
-            bail!("chunk of {n} tokens (cap {})", self.chunk_cap);
+            bail!("{n} entries (cap {})", self.chunk_cap);
         }
-        if start_pos + n > self.max_seq {
-            bail!("chunk exceeds max_seq {}", self.max_seq);
+        for &(_, pos, seq) in entries {
+            if pos >= self.max_seq {
+                bail!("position {pos} exceeds max_seq {}", self.max_seq);
+            }
+            if seq >= self.batch_cap {
+                bail!("sequence slot {seq} exceeds batch cap {}", self.batch_cap);
+            }
         }
         let c = self.cfg.clone();
         let cu = Arc::clone(&self.cuda);
@@ -355,8 +384,12 @@ impl Decoder {
         let hid = c.hidden as i32;
         let h_at = |b: CUdeviceptr, t: usize| b + (t * c.hidden * 4) as u64;
 
-        for (t, tok) in tokens.iter().enumerate() {
-            ke.bf16_row(cu, self.core.embed, *tok as i32, hid, h_at(self.h_buf, t), st)?;
+        let kv_elem = if self.kv_f16 { 2 } else { 4 };
+        let seq_off = |seq: usize| {
+            (seq * c.kv_heads * self.max_seq * c.head_dim * kv_elem) as u64
+        };
+        for (t, &(tok, _, _)) in entries.iter().enumerate() {
+            ke.bf16_row(cu, self.core.embed, tok as i32, hid, h_at(self.h_buf, t), st)?;
         }
 
         // Waves release eagerly, so a wave may use every slot in the layer —
@@ -368,9 +401,9 @@ impl Decoder {
 
             // Attention, causally in order; KV appended before later tokens
             // attend, so within-chunk attention sees the whole prefix.
-            for t in 0..n {
-                let pos = start_pos + t;
+            for (t, &(_, pos, seq)) in entries.iter().enumerate() {
                 let ht = h_at(self.h_buf, t);
+                let (kc, vc) = (self.kcache[l] + seq_off(seq), self.vcache[l] + seq_off(seq));
                 ke.rmsnorm(cu, ht, w.input_ln, self.h_norm, 1, hid, c.rms_eps, st)?;
                 mat_gemv(ke, cu, &w.q, self.h_norm, self.q, st)?;
                 mat_gemv(ke, cu, &w.k, self.h_norm, self.k, st)?;
@@ -380,12 +413,12 @@ impl Decoder {
                 ke.rope(cu, self.q, c.heads as i32, c.head_dim as i32, pos as i32, c.rope_theta, st)?;
                 ke.rope(cu, self.k, c.kv_heads as i32, c.head_dim as i32, pos as i32, c.rope_theta, st)?;
                 ke.kv_append(
-                    cu, self.k, self.v, self.kcache[l], self.vcache[l],
+                    cu, self.k, self.v, kc, vc,
                     c.kv_heads as i32, c.head_dim as i32, pos as i32, self.max_seq as i32,
                     self.kv_f16, st,
                 )?;
                 ke.attn_decode(
-                    cu, self.q, self.kcache[l], self.vcache[l], self.attn_out, self.attn_scratch,
+                    cu, self.q, kc, vc, self.attn_out, self.attn_scratch,
                     c.heads as i32, c.kv_heads as i32, c.head_dim as i32,
                     (pos + 1) as i32, self.max_seq as i32,
                     1.0 / (c.head_dim as f32).sqrt(), self.kv_f16, st,
@@ -467,22 +500,45 @@ impl Decoder {
         }
 
         if !want_logits {
-            return Ok(0);
+            return Ok(vec![0; n]);
         }
-        let last = h_at(self.h_buf, n - 1);
-        ke.rmsnorm(cu, last, self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
-        mat_gemv(ke, cu, &self.core.lm_head, self.h_norm, self.logits, st)?;
-        cu.dtoh_async(&mut self.logits_host, self.logits, st)?;
-        cu.sync_stream(st)?;
-        let logits = f32_from_le(&self.logits_host);
-        let (mut best, mut bestv) = (0u32, f32::MIN);
-        for (i, v) in logits.iter().enumerate() {
-            if *v > bestv {
-                bestv = *v;
-                best = i as u32;
+        // Per-entry logits; the wrapper cases (prefill, single decode) read
+        // one, lockstep batch reads all. Distinct sequence slots each need
+        // theirs; same-slot prefill only needs the last, so skip the rest.
+        self.logits_multi.clear();
+        let mut out = Vec::with_capacity(n);
+        for (t, &(_, _, seq)) in entries.iter().enumerate() {
+            let is_last_for_slot = entries
+                .iter()
+                .skip(t + 1)
+                .all(|&(_, _, s2)| s2 != seq);
+            if !is_last_for_slot {
+                self.logits_multi.push(Vec::new());
+                out.push(0);
+                continue;
             }
+            ke.rmsnorm(cu, h_at(self.h_buf, t), self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
+            mat_gemv(ke, cu, &self.core.lm_head, self.h_norm, self.logits, st)?;
+            cu.dtoh_async(&mut self.logits_host, self.logits, st)?;
+            cu.sync_stream(st)?;
+            let logits = f32_from_le(&self.logits_host);
+            let (mut best, mut bestv) = (0u32, f32::MIN);
+            for (i, v) in logits.iter().enumerate() {
+                if *v > bestv {
+                    bestv = *v;
+                    best = i as u32;
+                }
+            }
+            self.logits_multi.push(logits);
+            out.push(best);
         }
-        Ok(best)
+        Ok(out)
+    }
+
+    /// Logits per entry from the last `step_multi(_, true)` call (empty for
+    /// entries that were not the last of their sequence slot).
+    pub fn last_logits_multi(&self) -> &[Vec<f32>] {
+        &self.logits_multi
     }
 
     pub fn chunk_cap(&self) -> usize {

@@ -31,6 +31,7 @@ fn main() -> Result<()> {
     let direct = arg(&args, "direct").as_deref() != Some("0");
     // Managed host-RAM expert tier (GB); the lever for packs >> RAM.
     let ram_gb: f64 = arg(&args, "ram-gb").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let batch: usize = arg(&args, "batch").and_then(|v| v.parse().ok()).unwrap_or(1);
 
     // Tokenizer is optional: --prompt-ids allows raw-id smoke tests.
     let tokenizer = match arg(&args, "tokenizer") {
@@ -71,6 +72,7 @@ fn main() -> Result<()> {
         core_q4,
         direct,
         (ram_gb * 1e9) as u64,
+        batch,
     )?;
     // Qwen cross-layer prefetch: default off (measured 18.5 -> 10.8 tok/s).
     dec.set_prefetch_next(arg(&args, "prefetch-next").as_deref() == Some("1"));
@@ -78,6 +80,56 @@ fn main() -> Result<()> {
     dec.set_min_expert_weight(
         arg(&args, "min-expert-weight").and_then(|v| v.parse().ok()).unwrap_or(0.0),
     );
+
+    // Lockstep batch self-test: decode the same prompt as N independent
+    // sequence slots; outputs must be bit-identical across slots (proves
+    // KV isolation) and reports aggregate throughput.
+    if let Some(nstr) = arg(&args, "batch-selftest").and_then(|v| v.parse::<usize>().ok()) {
+        let t0 = Instant::now();
+        let mut next = vec![0u32; nstr];
+        for s in 0..nstr {
+            let mut pos = 0usize;
+            for chunk in prompt_ids.chunks(dec.chunk_cap()) {
+                let entries: Vec<(u32, usize, usize)> =
+                    chunk.iter().enumerate().map(|(i, t)| (*t, pos + i, s)).collect();
+                let last = pos + chunk.len() == prompt_ids.len();
+                let out = dec.step_multi(&entries, last)?;
+                if last {
+                    next[s] = *out.last().unwrap();
+                }
+                pos += chunk.len();
+            }
+        }
+        eprintln!("prefill x{nstr} done in {:.1}s", t0.elapsed().as_secs_f64());
+        let t1 = Instant::now();
+        let mut total = 0usize;
+        let mut pos = prompt_ids.len();
+        for _ in 0..max_tokens {
+            if next.iter().any(|t| dec.eos().contains(t)) || pos >= max_seq {
+                break;
+            }
+            let entries: Vec<(u32, usize, usize)> =
+                next.iter().map(|t| (*t, pos, 0)).enumerate()
+                    .map(|(s, (t, p, _))| (t, p, s)).collect();
+            let out = dec.step_multi(&entries, true)?;
+            if out.windows(2).any(|w| w[0] != w[1]) {
+                bail!("STREAM DIVERGENCE at pos {pos}: {out:?}");
+            }
+            next = out;
+            total += nstr;
+            pos += 1;
+        }
+        let secs = t1.elapsed().as_secs_f64();
+        let m = dec.pager_metrics();
+        println!(
+            "batch-selftest PASS: {nstr} identical streams, {total} tokens in {secs:.2}s \
+             = {:.2} tok/s aggregate ({:.2} per stream); cache {:.1}% hit",
+            total as f64 / secs,
+            total as f64 / secs / nstr as f64,
+            100.0 * m.hit_rate(),
+        );
+        return Ok(());
+    }
 
     // Perplexity mode: teacher-forced NLL over a text file. Validates the
     // whole pipeline numerically — and PPL must be identical across cache
