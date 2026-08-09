@@ -1015,6 +1015,14 @@ impl KimiDecoder {
         self.pager.as_ref().unwrap().metrics()
     }
 
+    pub fn expert_stats(&self) -> Vec<u64> {
+        self.pager.as_ref().unwrap().expert_stats()
+    }
+
+    pub fn prewarm(&self, counts: &[u64]) -> Result<usize> {
+        self.pager.as_ref().unwrap().prewarm(counts)
+    }
+
     pub fn last_logits(&self) -> Vec<f32> {
         f32_from_le(&self.logits_host)
     }

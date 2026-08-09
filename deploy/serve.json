@@ -32,7 +32,8 @@
       "ram_gb": 80,
       "max_seq": 2048,
       "min_expert_weight": 0.05,
-      "batch": 2
+      "batch": 2,
+      "prewarm": "/data/models/kimi-k2.6.profile.json"
     }
   ]
 }

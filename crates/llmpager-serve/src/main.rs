@@ -41,6 +41,9 @@ struct ModelSpec {
     batch: usize,
     /// Skip routed experts under this scaled weight (kimi fetch saver).
     min_expert_weight: f64,
+    /// Fetch-count profile file: loaded into the RAM tier at warm-up,
+    /// rewritten with fresh stats at eviction (self-improving).
+    prewarm: Option<PathBuf>,
 }
 
 struct Engine {
@@ -95,6 +98,14 @@ impl Registry {
         let spec = self.spec(name)?.clone();
         while self.warm.len() >= self.max_warm.max(1) {
             let (evicted, engine) = self.warm.pop().unwrap();
+            // Persist the workload profile so the next warm-up pre-warms.
+            if let Ok(spec) = self.spec(&evicted) {
+                if let Some(f) = &spec.prewarm {
+                    if let Ok(j) = serde_json::to_vec(&engine.dec.expert_stats()) {
+                        let _ = std::fs::write(f, j);
+                    }
+                }
+            }
             drop(engine);
             eprintln!("evicted model {evicted}");
         }
@@ -118,6 +129,20 @@ impl Registry {
             )?;
             let mut dec = dec;
             dec.set_min_expert_weight(spec.min_expert_weight as f32);
+            if let Some(f) = &spec.prewarm {
+                if let Ok(raw) = std::fs::read(f) {
+                    if let Ok(counts) = serde_json::from_slice::<Vec<u64>>(&raw) {
+                        let t = Instant::now();
+                        match dec.prewarm(&counts) {
+                            Ok(n) => eprintln!(
+                                "prewarm: {n} experts in {:.1}s",
+                                t.elapsed().as_secs_f64()
+                            ),
+                            Err(e) => eprintln!("prewarm failed: {e:#}"),
+                        }
+                    }
+                }
+            }
             Ok(Engine { dec, tok, cur_slots: slots, max_seq: spec.max_seq })
         };
         let engine = match load(&spec, slots) {
@@ -423,6 +448,7 @@ fn main() -> Result<()> {
                 max_seq: m["max_seq"].as_u64().unwrap_or(4096) as usize,
                 batch: m["batch"].as_u64().unwrap_or(1) as usize,
                 min_expert_weight: m["min_expert_weight"].as_f64().unwrap_or(0.0),
+                prewarm: m["prewarm"].as_str().map(PathBuf::from),
             })
         })
         .collect::<Result<_>>()?;

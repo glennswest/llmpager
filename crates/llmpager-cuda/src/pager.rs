@@ -197,6 +197,9 @@ struct Shared {
     // Latency histogram buckets: <1, <2, <5, <10, <20, <50, >=50 ms.
     lat_buckets: [AtomicU64; 7],
     ram: Option<RamTier>,
+    /// Per-(layer, expert) fetch counts — the profile that drives pre-warm.
+    fetch_counts: Vec<AtomicU64>,
+    experts_per_layer: u16,
 }
 
 impl Shared {
@@ -262,6 +265,10 @@ impl Pager {
             span,
             bytes_fetched: AtomicU64::new(0),
             ram: RamTier::new(cfg.ram_bytes, span, meta.num_layers, meta.experts_per_layer),
+            fetch_counts: (0..meta.num_layers as usize * meta.experts_per_layer as usize)
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+            experts_per_layer: meta.experts_per_layer,
             fetches: AtomicU64::new(0),
             lat_buckets: Default::default(),
         });
@@ -376,6 +383,44 @@ impl Pager {
 
     pub fn slots_per_layer(&self) -> u32 {
         self.shared.slots_per_layer
+    }
+
+    /// Per-(layer, expert) fetch counts, row-major — a workload profile.
+    pub fn expert_stats(&self) -> Vec<u64> {
+        self.shared.fetch_counts.iter().map(|c| c.load(Ordering::Relaxed)).collect()
+    }
+
+    /// Preload the RAM tier with the highest-count experts from a profile
+    /// (row-major layer*epl+expert counts). Reads sequentially by pack
+    /// order for disk efficiency; stops when the tier stops accepting.
+    /// No-op without a RAM tier.
+    pub fn prewarm(&self, counts: &[u64]) -> Result<usize> {
+        let Some(ram) = self.shared.ram.as_ref() else {
+            return Ok(0);
+        };
+        let epl = self.shared.experts_per_layer as usize;
+        let capacity = (ram.bytes / ram.span) as usize;
+        let mut ranked: Vec<(u64, usize)> = counts
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c > 0)
+            .map(|(i, c)| (*c, i))
+            .collect();
+        ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        ranked.truncate(capacity);
+        // Pack-order for near-sequential reads.
+        let mut idxs: Vec<usize> = ranked.into_iter().map(|(_, i)| i).collect();
+        idxs.sort_unstable();
+
+        let mut buf = llmpager_core::pack::AlignedBuf::new(self.shared.span);
+        let mut loaded = 0usize;
+        for i in idxs {
+            let (layer, expert) = ((i / epl) as u16, (i % epl) as u16);
+            self.index.read_blob_into(layer, expert, buf.as_mut())?;
+            ram.put(layer, expert, &buf.as_ref()[..self.shared.span]);
+            loaded += 1;
+        }
+        Ok(loaded)
     }
 
     pub fn metrics(&self) -> Metrics {
@@ -511,6 +556,9 @@ fn worker(
         shared.lat_buckets[bucket].fetch_add(1, Ordering::Relaxed);
         shared.bytes_fetched.fetch_add(len as u64, Ordering::Relaxed);
         shared.fetches.fetch_add(1, Ordering::Relaxed);
+        shared.fetch_counts
+            [job.layer as usize * shared.experts_per_layer as usize + job.expert as usize]
+            .fetch_add(1, Ordering::Relaxed);
 
         let mut st = shared.state.lock().unwrap();
         st.fill[idx] = Fill::Ready;

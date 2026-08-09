@@ -106,6 +106,20 @@ impl AnyDecoder {
         }
     }
 
+    pub fn expert_stats(&self) -> Vec<u64> {
+        match self {
+            AnyDecoder::Qwen(d) => d.expert_stats(),
+            AnyDecoder::Kimi(d) => d.expert_stats(),
+        }
+    }
+
+    pub fn prewarm(&self, counts: &[u64]) -> Result<usize> {
+        match self {
+            AnyDecoder::Qwen(d) => d.prewarm(counts),
+            AnyDecoder::Kimi(d) => d.prewarm(counts),
+        }
+    }
+
     pub fn eos(&self) -> &[u32] {
         match self {
             AnyDecoder::Qwen(d) => &d.cfg.eos,

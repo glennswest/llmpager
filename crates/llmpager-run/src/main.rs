@@ -74,6 +74,17 @@ fn main() -> Result<()> {
         (ram_gb * 1e9) as u64,
         batch,
     )?;
+    // Profiled pre-warm: load a fetch-count profile into the RAM tier
+    // before the first token; save one at exit with --profile-out.
+    if let Some(f) = arg(&args, "prewarm") {
+        let counts: Vec<u64> =
+            serde_json::from_slice(&std::fs::read(&f).context("reading --prewarm")?)?;
+        let t = Instant::now();
+        let n = dec.prewarm(&counts)?;
+        eprintln!("prewarm: {n} experts into the RAM tier in {:.1}s", t.elapsed().as_secs_f64());
+    }
+    let profile_out = arg(&args, "profile-out");
+
     // Qwen cross-layer prefetch: default off (measured 18.5 -> 10.8 tok/s).
     dec.set_prefetch_next(arg(&args, "prefetch-next").as_deref() == Some("1"));
     // Kimi fetch-traffic knob: drop routed experts below this scaled weight.
@@ -237,6 +248,10 @@ fn main() -> Result<()> {
         println!();
     }
 
+    if let Some(f) = &profile_out {
+        std::fs::write(f, serde_json::to_vec(&dec.expert_stats())?)?;
+        eprintln!("profile written to {f}");
+    }
     let m = dec.pager_metrics();
     eprintln!(
         "prefill {:.2}s ({:.2} tok/s) | decode {:.2}s ({:.2} tok/s) | \
