@@ -1,5 +1,27 @@
 # Benchmarks
 
+## M8 pre-warm + expert dropping: honest findings — 2026-08-09
+
+Kimi, 120-token generation, 80GB RAM tier, identical prompt A/B:
+
+| Run | Decode | RAM tier hit |
+|---|---|---|
+| Cold tier (profiling) | 0.57 tok/s | 44.2% |
+| Pre-warmed from that profile | 0.55 tok/s | 44.2% |
+
+**Pre-warm is neutral here**: the workload touches ~15-20k unique experts
+against ~3,200 tier slots — capacity binds, not warm-up order; organic
+write-allocate reaches the same steady state within seconds. The feature
+stays (free, helps short requests, serving self-profiles at eviction),
+but it is not a throughput lever at this tier/working-set ratio.
+
+**Expert dropping re-read**: at threshold 0.05 nothing is actually
+dropped (post-renorm x2.827-scaled weights rarely go that low) — which
+is why PPL was unchanged. 0.10 drops a little at +0.72% PPL. Not a real
+Kimi lever; the honest single-stream constraint is disk bandwidth vs
+working set, and the honest multipliers are batch (shipped, 1.94x at 2)
+and the entropy-coded pack (M8-5, 10-20% bandwidth).
+
 ## M7-4 batched decode + expert dropping — 2026-08-09, ai.g8.lo
 
 Lockstep batch decode (step_multi): N streams on independent KV slots,
