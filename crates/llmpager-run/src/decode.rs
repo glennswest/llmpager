@@ -545,6 +545,10 @@ impl Decoder {
         self.chunk_cap
     }
 
+    pub fn batch_cap(&self) -> usize {
+        self.batch_cap
+    }
+
     pub fn pager_metrics(&self) -> llmpager_cuda::pager::Metrics {
         self.pager.as_ref().unwrap().metrics()
     }

@@ -205,6 +205,113 @@ fn generate(
     Ok((text, ids.len(), out_ids.len(), t0.elapsed().as_secs_f64()))
 }
 
+/// Lockstep batch generation: N prompts decode together on independent
+/// sequence slots, sharing every layer's expert fetches. Greedy or sampled
+/// per stream (seed offset by stream index). Returns per-stream
+/// (text, prompt_tokens, completion_tokens).
+fn generate_batch(
+    engine: &mut Engine,
+    prompts: &[String],
+    max_tokens: usize,
+    sampling: &Sampling,
+) -> Result<Vec<(String, usize, usize)>> {
+    let nstr = prompts.len();
+    if nstr > engine.dec.batch_cap() {
+        bail!(
+            "{nstr} prompts exceed this model's batch capacity {} (raise `batch` in serve.json)",
+            engine.dec.batch_cap()
+        );
+    }
+    let cap = engine.dec.chunk_cap();
+    let mut ids: Vec<Vec<u32>> = Vec::with_capacity(nstr);
+    for p in prompts {
+        let v = engine
+            .tok
+            .encode(p.as_str(), false)
+            .map_err(|e| anyhow::anyhow!("encode: {e}"))?
+            .get_ids()
+            .to_vec();
+        if v.is_empty() {
+            bail!("empty prompt after tokenization");
+        }
+        ids.push(v);
+    }
+
+    // Prefill each stream on its own slot (chunked union fetching). The
+    // logits buffer only survives until the next step_multi call, so the
+    // sampled first token is drawn inside each stream's prefill.
+    let plain_greedy = sampling.is_greedy() && sampling.repeat_penalty == 1.0;
+    let mut rngs: Vec<SampleRng> =
+        (0..nstr).map(|s| SampleRng::new(sampling.seed.wrapping_add(s as u64))).collect();
+    let mut next = vec![0u32; nstr];
+    for s in 0..nstr {
+        let mut pos = 0usize;
+        for chunk in ids[s].chunks(cap) {
+            let entries: Vec<(u32, usize, usize)> =
+                chunk.iter().enumerate().map(|(i, t)| (*t, pos + i, s)).collect();
+            let last = pos + chunk.len() == ids[s].len();
+            let out = engine.dec.step_multi(&entries, last)?;
+            if last {
+                next[s] = *out.last().unwrap();
+                if !plain_greedy {
+                    if let Some(l) = engine
+                        .dec
+                        .last_logits_multi_or_single()
+                        .last()
+                        .filter(|l| !l.is_empty())
+                    {
+                        next[s] = sample(l, &[], sampling, &mut rngs[s]);
+                    }
+                }
+            }
+            pos += chunk.len();
+        }
+    }
+
+    // Lockstep decode; streams retire on EOS or max_seq independently.
+    let mut out_ids: Vec<Vec<u32>> = vec![Vec::new(); nstr];
+    let mut done = vec![false; nstr];
+    let mut pos: Vec<usize> = ids.iter().map(|v| v.len()).collect();
+    for _ in 0..max_tokens {
+        for s in 0..nstr {
+            if done[s] {
+                continue;
+            }
+            if engine.dec.eos().contains(&next[s]) || pos[s] >= engine.max_seq {
+                done[s] = true;
+                continue;
+            }
+            out_ids[s].push(next[s]);
+        }
+        let active: Vec<usize> = (0..nstr).filter(|&s| !done[s]).collect();
+        if active.is_empty() {
+            break;
+        }
+        let entries: Vec<(u32, usize, usize)> =
+            active.iter().map(|&s| (next[s], pos[s], s)).collect();
+        let out = engine.dec.step_multi(&entries, true)?;
+        let lm = engine.dec.last_logits_multi_or_single();
+        for (i, &s) in active.iter().enumerate() {
+            next[s] = if plain_greedy {
+                out[i]
+            } else {
+                sample(&lm[i], &out_ids[s], sampling, &mut rngs[s])
+            };
+            pos[s] += 1;
+        }
+    }
+
+    let mut res = Vec::with_capacity(nstr);
+    for s in 0..nstr {
+        let text = engine
+            .tok
+            .decode(&out_ids[s], true)
+            .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+        res.push((text, ids[s].len(), out_ids[s].len()));
+    }
+    Ok(res)
+}
+
 /// Blocking reader over an mpsc of byte chunks — bridges a generation
 /// thread into tiny_http's streaming response body.
 struct ChannelReader {
@@ -397,6 +504,49 @@ fn handle(
                 r.warm_up(&model)?;
                 r.warm[0].1.dec.is_kimi()
             };
+            // Batch forms (completions only): "prompt" as an array, or n>1
+            // duplicating one prompt. Streams decode in lockstep, sharing
+            // every expert fetch.
+            if !chat && !stream {
+                let n_req = req["n"].as_u64().unwrap_or(1) as usize;
+                let arr: Option<Vec<String>> = req["prompt"].as_array().map(|a| {
+                    a.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                });
+                let prompts: Option<Vec<String>> = match (arr, n_req) {
+                    (Some(v), _) if v.len() > 1 => Some(v),
+                    (None, n) if n > 1 => req["prompt"]
+                        .as_str()
+                        .map(|p| vec![p.to_string(); n]),
+                    _ => None,
+                };
+                if let Some(prompts) = prompts {
+                    let t0 = Instant::now();
+                    let mut r = registry.lock().unwrap();
+                    r.warm_up(&model)?;
+                    let engine = &mut r.warm[0].1;
+                    let results = generate_batch(engine, &prompts, max_tokens, &sampling)?;
+                    let secs = t0.elapsed().as_secs_f64();
+                    let (p_sum, c_sum): (usize, usize) = results
+                        .iter()
+                        .fold((0, 0), |(p, c), (_, pp, cc)| (p + pp, c + cc));
+                    let choices: Vec<_> = results
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (text, _, _))| {
+                            serde_json::json!({"index": i, "text": text,
+                                                "finish_reason": "stop"})
+                        })
+                        .collect();
+                    return Ok(Resp::Json(serde_json::json!({
+                        "id": "cmpl-llmpager", "object": "text_completion", "model": model,
+                        "choices": choices,
+                        "usage": {"prompt_tokens": p_sum, "completion_tokens": c_sum,
+                                   "total_tokens": p_sum + c_sum},
+                        "llmpager": {"seconds": secs, "streams": prompts.len(),
+                            "tok_per_sec_aggregate": c_sum as f64 / secs.max(1e-9)}})));
+                }
+            }
+
             let prompt = if chat {
                 let messages = req["messages"].as_array().context("missing messages")?;
                 if kimi {

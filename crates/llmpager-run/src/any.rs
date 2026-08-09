@@ -71,6 +71,21 @@ impl AnyDecoder {
         }
     }
 
+    /// Per-entry logits from the last step_multi (Qwen); empty for Kimi.
+    pub fn last_logits_multi_or_single(&self) -> &[Vec<f32>] {
+        match self {
+            AnyDecoder::Qwen(d) => d.last_logits_multi(),
+            AnyDecoder::Kimi(_) => &[],
+        }
+    }
+
+    pub fn batch_cap(&self) -> usize {
+        match self {
+            AnyDecoder::Qwen(d) => d.batch_cap(),
+            AnyDecoder::Kimi(_) => 1,
+        }
+    }
+
     pub fn chunk_cap(&self) -> usize {
         match self {
             AnyDecoder::Qwen(d) => d.chunk_cap(),
