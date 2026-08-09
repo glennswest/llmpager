@@ -1,0 +1,41 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: "Red Hat Display","Inter","Helvetica Neue",Arial,sans-serif; overflow:hidden; }
+.thumb { width:1280px; height:720px; position:absolute; inset:0; display:none;
+         flex-direction:column; justify-content:center; padding:0 70px; }
+.thumb.active { display:flex; }
+.t1 { background:#151515; color:#fff; }
+.t1 .strip { position:absolute; left:0; top:0; bottom:0; width:18px; background:#EE0000; }
+.big { font-weight:900; font-size:118px; line-height:1.02; letter-spacing:-0.01em; }
+.big .red { color:#EE0000; }
+.mid { font-weight:700; font-size:54px; margin-top:26px; color:#B8BBBE; }
+.mid b { color:#fff; }
+.tag { position:absolute; bottom:36px; left:70px; font-weight:700; font-size:30px;
+       color:#8A8D90; letter-spacing:0.08em; }
+.t2 { background:#fff; color:#151515; }
+.t2 .bar { position:absolute; left:0; right:0; top:0; height:16px; background:#EE0000; }
+.vs { display:flex; align-items:center; gap:40px; margin-bottom:10px; }
+.vs .num { font-weight:900; font-size:150px; line-height:1; }
+.vs .num small { font-size:70px; }
+.vs .num.red { color:#EE0000; }
+.vs .word { font-weight:900; font-size:60px; color:#6A6E73; }
+.sub2 { font-weight:800; font-size:56px; margin-top:8px; }
+.sub2 .red { color:#EE0000; }
+</style></head><body>
+<section class="thumb t1 active">
+  <div class="strip"></div>
+  <div class="big"><span class="red">1 TRILLION</span><br>PARAMETERS</div>
+  <div class="mid">running on a <b>$429 GPU</b></div>
+  <div class="tag">llmpager &nbsp;·&nbsp; Rust + CUDA &nbsp;·&nbsp; open source</div>
+</section>
+<section class="thumb t2">
+  <div class="bar"></div>
+  <div class="vs"><div class="num">571<small>GB</small></div><div class="word">MODEL</div></div>
+  <div class="vs"><div class="num red">16<small>GB</small></div><div class="word">GPU</div></div>
+  <div class="sub2">It runs <span class="red">anyway.</span></div>
+</section>
+<script>
+const i = parseInt(location.hash.slice(1) || "1", 10);
+document.querySelectorAll(".thumb").forEach((t, j) => t.classList.toggle("active", j === i - 1));
+</script>
+</body></html>

@@ -245,3 +245,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **feat:** M8-1 RAM tier shipped and measured: Kimi 0.35 -> 0.57 tok/s (+63%) on the first still-cold run
 - **docs:** Kimi milestone presentation (kimi.html, 15 slides + narration)
 - **docs:** Kimi milestone video built (kimi-video.mp4, 8:56, 15 slides, edge-TTS) + kimi.pdf export
+- **docs:** YouTube upload kit for the Kimi video — 2 thumbnails (JPG+PNG+source) and writeup with chapters
