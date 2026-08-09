@@ -725,7 +725,6 @@ impl KimiDecoder {
             let pack_layer = (l - c.dense_layers) as u16;
             let slots = self.pager.as_ref().unwrap().slots_per_layer() as usize;
             let inter = c.moe_inter as i32;
-            let single_wave = picks.len() <= slots;
             for wave in picks.chunks(slots.max(1)) {
                 let ids: Vec<u16> = wave.iter().map(|p| p.0).collect();
                 let handles = self.pager.as_ref().unwrap().request(pack_layer, &ids)?;
@@ -743,16 +742,14 @@ impl KimiDecoder {
                 ke.silu_mul(cu, self.gate_out, self.up_out, self.act_out, e * inter, st)?;
                 ke.q4g64_gemv_batch(cu, self.d_expert_ptrs, self.down_off, self.act_out, inter, self.expert_out, hid, inter, self.expert_group, e, st)?;
                 ke.moe_reduce(cu, self.expert_out, self.d_expert_wts, self.h, e, hid, st)?;
-                if single_wave {
-                    // Pipeline-friendly path: defer release on an event.
-                    self.defer_release(handles)?;
-                } else {
-                    // Multi-wave: the next wave's request needs these slots
-                    // back; sync and release eagerly.
-                    cu.sync_stream(st)?;
-                    for h in handles {
-                        self.pager.as_ref().unwrap().release(h);
-                    }
+                // Always eager: a deferred release is only drained by later
+                // defer calls, and mixed eager/deferred layers deadlock —
+                // pinned slots nobody ever frees (found via a hung
+                // expert-dropping run). At Kimi's disk-bound speeds the
+                // per-wave sync is noise.
+                cu.sync_stream(st)?;
+                for h in handles {
+                    self.pager.as_ref().unwrap().release(h);
                 }
             }
             ke.add(cu, self.h, self.sh_out, hid, st)?;
