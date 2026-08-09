@@ -223,10 +223,14 @@ near-sequential ~9.6GB sweep), uniform blob size (no slot fragmentation).
       fp8 (~6.7GB, native on Blackwell) vs q4g64 (~3.4GB) vs bf16
       (13.4GB, doesn't fit). Per-tensor choice — attention fp8 +
       shared/dense q4 is the likely sweet spot. Requires fp8 GEMV kernel.
-- [ ] 5. Entropy-coded pack (ANS/GDeflate-class) + GPU decompression
-      stage: QAT int4 nibbles are non-uniform; 10-20% smaller pack =
-      10-20% fetch bandwidth = direct tok/s (disk-bound). High
-      complexity; needs a decompress kernel between pinned and slot.
+- [x] 5. Entropy-coded pack (v0.16.0): spike measured 13.2% ceiling,
+      zstd -3 achieves it; shipped as CPU-decode-in-workers (no GPU
+      stage needed). Verdict from real A/B: 496GB (-13.0%) but decode
+      0.32 vs 0.58 tok/s — decompress latency rides the miss critical
+      path. SPACE feature (convert with LLMPAGER_COMPRESS=zstd), not a
+      speed lever. Pre-warm rerun on the fixed binary: REAL +24%
+      decode / +67% prefill (tier 42.6->61.4% hits) — serving
+      self-profiling now pays off directly.
 - [ ] 6. Blob phase split (gate+up | down): stream each expert in two
       phases, halving staging footprint and overlapping finer. Small win.
 - [ ] 7. Cold-expert lower-bit tier (int3 for rarely-routed experts):

@@ -1,5 +1,24 @@
 # Benchmarks
 
+## M8 corrected A/B: pre-warm works, zstd is space-not-speed — 2026-08-09
+
+Rerun on a verified binary (the retracted runs below used a stale one).
+Kimi, 100-token generation, 80GB RAM tier, identical prompt:
+
+| Run | Prefill | Decode | RAM tier hit |
+|---|---|---|---|
+| Raw pack, cold tier | 0.52 tok/s | 0.58 tok/s | 42.6% |
+| Raw pack, **pre-warmed** | **0.87 tok/s** | **0.72 tok/s (+24%)** | **61.4%** |
+| zstd pack (496GB), cold | 0.40 tok/s | 0.32 tok/s | 39.2% |
+
+- **Pre-warm is a real lever** (+24% decode, +67% prefill): serving
+  self-profiles at eviction and pre-warms at load, so this compounds.
+- **zstd**: 13.0% smaller exactly as the entropy spike predicted — but
+  decompression rides the fetch critical path (~6ms -> ~23ms per miss)
+  and single-stream decode is latency-bound. Verdict: keep the format
+  for space-constrained deployments (LLMPAGER_COMPRESS=zstd at convert);
+  do not use it for speed. The experimental pack was deleted.
+
 ## M8 pre-warm + expert dropping — 2026-08-09 (RETRACTED, see below)
 
 **RETRACTION**: these runs executed on a stale binary (a silently failed
