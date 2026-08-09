@@ -246,3 +246,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **docs:** Kimi milestone presentation (kimi.html, 15 slides + narration)
 - **docs:** Kimi milestone video built (kimi-video.mp4, 8:56, 15 slides, edge-TTS) + kimi.pdf export
 - **docs:** YouTube upload kit for the Kimi video — 2 thumbnails (JPG+PNG+source) and writeup with chapters
+- **feat:** M7-4 complete — batched decode both engines + serve batch API; Qwen batch-2 1.94x aggregate; expert dropping free at 0.05 (kimi default); eager-release deadlock fixed

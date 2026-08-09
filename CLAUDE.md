@@ -183,7 +183,11 @@ Approved 2026-08-08: items 1-5.
 - [x] 3. Kimi serving (v0.12.0): AnyDecoder registry (auto-detect),
       im_user/im_middle chat template (matches checkpoint jinja);
       deployed live, sampled haiku verified via API.
-- [ ] 4. Batched decode — staged plan:
+- [x] 4. Batched decode (v0.15.0) — step_multi on both engines,
+      serve prompt-array/n>1 API, selftests PASS; Qwen batch 2 =
+      1.94x aggregate (97% efficiency), batch 4 = 2.32x. Expert
+      dropping validated free at 0.05 (+0.10% PPL), kimi default.
+      Original staged plan:
       (a) [x] f16 KV cache (default; LLMPAGER_KV_F32=1 reverts) — PPL
           12.9575 (f32) vs 12.9671 (f16), +0.07% = noise; and +14%
           decode (26.9 -> 30.6 tok/s teacher-forced, less cache BW),

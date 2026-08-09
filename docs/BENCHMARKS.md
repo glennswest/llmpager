@@ -1,5 +1,28 @@
 # Benchmarks
 
+## M7-4 batched decode + expert dropping — 2026-08-09, ai.g8.lo
+
+Lockstep batch decode (step_multi): N streams on independent KV slots,
+every layer fetches the union of all streams' experts. Selftest requires
+bit-identical outputs across identical streams (KV isolation gate) —
+PASS on both engines.
+
+Qwen3-30B-A3B, 48 slots, RAM-tier warm, 48 tokens/stream:
+
+| Batch | Aggregate tok/s | Per stream | Scaling |
+|---|---|---|---|
+| 1 | 24.4 | 24.4 | 1.00x |
+| 2 | 47.3 | 23.6 | **1.94x** |
+| 4 | 56.7 | 14.2 | 2.32x |
+
+Identical prompts share all expert fetches (upper bound for sharing);
+the batch-4 rolloff is per-entry attention/logits serialization, not
+fetch traffic — the next batching win is batching those stages.
+
+Expert dropping (kimi, min-expert-weight): PPL 12.3093 (off) /
+12.3214 (0.05, +0.10% = noise) / 12.3974 (0.10, +0.72%). 0.05 is now
+the kimi serving default.
+
 ## Kimi K2.6 (1T / 32B active) first light — 2026-08-08, ai.g8.lo
 
 570.9GB expert pack (int4 g32, bit-exact QAT repack) + 23.4GB core

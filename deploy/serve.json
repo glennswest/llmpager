@@ -28,7 +28,9 @@
       "io_threads": 8,
       "direct": true,
       "ram_gb": 80,
-      "max_seq": 2048
+      "max_seq": 2048,
+      "min_expert_weight": 0.05,
+      "batch": 2
     }
   ]
 }
