@@ -367,6 +367,7 @@ pub struct KimiDecoder {
     direct: bool,
     ram_bytes: u64,
     max_seq: usize,
+    batch_cap: usize,
     /// Skip routed experts whose normalized weight falls below this
     /// (fetch-traffic saver; 0.0 disables).
     pub min_expert_weight: f32,
@@ -403,6 +404,7 @@ pub struct KimiDecoder {
     expert_group: i32,
     logits_host: Vec<u8>,
     router_host: Vec<u8>,
+    logits_multi: Vec<Vec<f32>>,
     embed_row: Vec<f32>,
     chunk_cap: usize,
     h_buf: CUdeviceptr,      // [chunk_cap, hidden]
@@ -438,7 +440,9 @@ impl KimiDecoder {
         max_seq: usize,
         direct: bool,
         ram_bytes: u64,
+        batch_cap: usize,
     ) -> Result<Self> {
+        let batch_cap = batch_cap.max(1);
         let meta = PackReader::open(pack_path)?.meta().clone();
         let cfg = KimiConfig::from_json(&meta.config)?;
         let expert_group: i32 = match meta.dtype.as_str() {
@@ -477,7 +481,7 @@ impl KimiDecoder {
         let f = |n: usize| cuda.alloc_device(n * 4);
         let qk = cfg.kv_lora + cfg.rope; // 576
         let cache: Vec<CUdeviceptr> =
-            (0..cfg.layers).map(|_| f(max_seq * qk)).collect::<Result<_>>()?;
+            (0..cfg.layers).map(|_| f(batch_cap * max_seq * qk)).collect::<Result<_>>()?;
         let inv_freq_dev = f(cfg.inv_freq.len())?;
         cuda.htod_async(inv_freq_dev, f32_bytes(&cfg.inv_freq), stream)?;
         cuda.sync_stream(stream)?;
@@ -520,6 +524,7 @@ impl KimiDecoder {
             expert_group,
             logits_host: vec![0u8; cfg.vocab * 4],
             router_host: vec![0u8; cfg.experts * 4],
+            logits_multi: Vec::new(),
             embed_row: vec![0f32; cfg.hidden],
             chunk_cap: 64,
             h_buf: f(64 * cfg.hidden)?,
@@ -540,6 +545,7 @@ impl KimiDecoder {
             direct,
             ram_bytes,
             max_seq,
+            batch_cap,
             min_expert_weight: 0.0,
         })
     }
@@ -775,21 +781,46 @@ impl KimiDecoder {
         self.chunk_cap
     }
 
-    /// Union prefill (see decode.rs): attention token-by-token, each MoE
-    /// layer's routed experts fetched once as the chunk union, in waves.
-    /// The shared expert and dense layers are per-token as in step().
+    /// Union prefill on sequence slot 0 (see decode.rs).
     pub fn step_chunk(
         &mut self,
         tokens: &[u32],
         start_pos: usize,
         want_logits: bool,
     ) -> Result<u32> {
-        let n = tokens.len();
+        let entries: Vec<(u32, usize, usize)> =
+            tokens.iter().enumerate().map(|(i, t)| (*t, start_pos + i, 0)).collect();
+        let out = self.step_multi(&entries, want_logits)?;
+        Ok(out.last().copied().unwrap_or(0))
+    }
+
+    pub fn batch_cap(&self) -> usize {
+        self.batch_cap
+    }
+
+    pub fn last_logits_multi(&self) -> &[Vec<f32>] {
+        &self.logits_multi
+    }
+
+    /// General multi-entry step (see decode.rs): (token, position, sequence
+    /// slot); same-slot entries ascending (prefill), distinct slots decode
+    /// in lockstep sharing each layer's expert union.
+    pub fn step_multi(
+        &mut self,
+        entries: &[(u32, usize, usize)],
+        want_logits: bool,
+    ) -> Result<Vec<u32>> {
+        let n = entries.len();
         if n == 0 || n > self.chunk_cap {
-            bail!("chunk of {n} tokens (cap {})", self.chunk_cap);
+            bail!("{n} entries (cap {})", self.chunk_cap);
         }
-        if start_pos + n > self.max_seq {
-            bail!("chunk exceeds max_seq {}", self.max_seq);
+        for &(_, pos, seq) in entries {
+            if pos >= self.max_seq {
+                bail!("position {pos} exceeds max_seq {}", self.max_seq);
+            }
+            if seq >= self.batch_cap {
+                bail!("sequence slot {seq} exceeds batch cap {}", self.batch_cap);
+            }
         }
         let c = self.cfg.clone();
         let cu = Arc::clone(&self.cuda);
@@ -803,9 +834,9 @@ impl KimiDecoder {
         let q_dim = (c.nope + c.rope) as i32;
         let h_at = |b: CUdeviceptr, t: usize| b + (t * c.hidden * 4) as u64;
 
-        for (t, tok) in tokens.iter().enumerate() {
+        for (t, &(tok, _, _)) in entries.iter().enumerate() {
             let row = &self.core.embed_host
-                [*tok as usize * c.hidden * 2..(*tok as usize + 1) * c.hidden * 2];
+                [tok as usize * c.hidden * 2..(tok as usize + 1) * c.hidden * 2];
             for (i, ch) in row.chunks_exact(2).enumerate() {
                 self.embed_row[i] = bf16_to_f32(u16::from_le_bytes([ch[0], ch[1]]));
             }
@@ -820,9 +851,9 @@ impl KimiDecoder {
         for l in 0..c.layers {
             let w = &self.core.layers[l];
 
-            for t in 0..n {
-                let pos = start_pos + t;
+            for (t, &(_, pos, seq)) in entries.iter().enumerate() {
                 let ht = h_at(self.h_buf, t);
+                let cache_l = self.cache[l] + (seq * self.max_seq * qk as usize * 4) as u64;
                 ke.rmsnorm(cu, ht, w.input_ln, self.h_norm, 1, hid, c.rms_eps, st)?;
                 mat_gemv(ke, cu, &w.q_a, self.h_norm, self.qa, st)?;
                 ke.rmsnorm(cu, self.qa, w.q_a_ln, self.qa, 1, c.q_lora as i32, c.rms_eps, st)?;
@@ -839,11 +870,11 @@ impl KimiDecoder {
                 )?;
                 ke.strided_copy(
                     cu, self.ckv_norm, c.kv_lora as i32, 0,
-                    self.cache[l], qk, (pos as i32) * qk, 1, c.kv_lora as i32, st,
+                    cache_l, qk, (pos as i32) * qk, 1, c.kv_lora as i32, st,
                 )?;
                 ke.strided_copy(
                     cu, self.kva, qk, c.kv_lora as i32,
-                    self.cache[l], qk, (pos as i32) * qk + c.kv_lora as i32, 1, c.rope as i32, st,
+                    cache_l, qk, (pos as i32) * qk + c.kv_lora as i32, 1, c.rope as i32, st,
                 )?;
                 ke.bf16_gemv_batch(
                     cu, w.kt, (c.kv_lora * c.nope) as u64,
@@ -855,7 +886,7 @@ impl KimiDecoder {
                     self.q_full, qk, c.kv_lora as i32, heads, c.rope as i32, st,
                 )?;
                 ke.mla_attn_decode(
-                    cu, self.q_full, self.cache[l], self.ctx, self.attn_scratch,
+                    cu, self.q_full, cache_l, self.ctx, self.attn_scratch,
                     heads, qk, c.kv_lora as i32,
                     (pos + 1) as i32, self.max_seq as i32, c.softmax_scale, st,
                 )?;
@@ -953,22 +984,34 @@ impl KimiDecoder {
         }
 
         if !want_logits {
-            return Ok(0);
+            return Ok(vec![0; n]);
         }
-        let last = h_at(self.h_buf, n - 1);
-        ke.rmsnorm(cu, last, self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
-        mat_gemv(ke, cu, &self.core.lm_head, self.h_norm, self.logits, st)?;
-        cu.dtoh_async(&mut self.logits_host, self.logits, st)?;
-        cu.sync_stream(st)?;
-        let logits = f32_from_le(&self.logits_host);
-        let (mut best, mut bestv) = (0u32, f32::MIN);
-        for (i, v) in logits.iter().enumerate() {
-            if *v > bestv {
-                bestv = *v;
-                best = i as u32;
+        self.logits_multi.clear();
+        let mut out = Vec::with_capacity(n);
+        for (t, &(_, _, seq)) in entries.iter().enumerate() {
+            let is_last_for_slot =
+                entries.iter().skip(t + 1).all(|&(_, _, s2)| s2 != seq);
+            if !is_last_for_slot {
+                self.logits_multi.push(Vec::new());
+                out.push(0);
+                continue;
             }
+            ke.rmsnorm(cu, h_at(self.h_buf, t), self.core.final_norm, self.h_norm, 1, hid, c.rms_eps, st)?;
+            mat_gemv(ke, cu, &self.core.lm_head, self.h_norm, self.logits, st)?;
+            cu.dtoh_async(&mut self.logits_host, self.logits, st)?;
+            cu.sync_stream(st)?;
+            let logits = f32_from_le(&self.logits_host);
+            let (mut best, mut bestv) = (0u32, f32::MIN);
+            for (i, v) in logits.iter().enumerate() {
+                if *v > bestv {
+                    bestv = *v;
+                    best = i as u32;
+                }
+            }
+            self.logits_multi.push(logits);
+            out.push(best);
         }
-        Ok(best)
+        Ok(out)
     }
 
     pub fn pager_metrics(&self) -> llmpager_cuda::pager::Metrics {

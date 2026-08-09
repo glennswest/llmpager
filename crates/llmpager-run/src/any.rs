@@ -30,9 +30,8 @@ impl AnyDecoder {
     ) -> Result<Self> {
         let meta = llmpager_core::pack::PackReader::open(pack)?.meta().clone();
         if kimi::KimiConfig::is_kimi(&meta.config) {
-            let _ = batch; // kimi batching lands after the qwen path proves out
             Ok(AnyDecoder::Kimi(kimi::KimiDecoder::new(
-                pack, core, slots, io_threads, max_seq, direct, ram_bytes,
+                pack, core, slots, io_threads, max_seq, direct, ram_bytes, batch,
             )?))
         } else {
             Ok(AnyDecoder::Qwen(decode::Decoder::new(
@@ -67,22 +66,22 @@ impl AnyDecoder {
     ) -> Result<Vec<u32>> {
         match self {
             AnyDecoder::Qwen(d) => d.step_multi(entries, want_logits),
-            AnyDecoder::Kimi(_) => anyhow::bail!("batched decode not yet wired for kimi"),
+            AnyDecoder::Kimi(d) => d.step_multi(entries, want_logits),
         }
     }
 
-    /// Per-entry logits from the last step_multi (Qwen); empty for Kimi.
+    /// Per-entry logits from the last step_multi call.
     pub fn last_logits_multi_or_single(&self) -> &[Vec<f32>] {
         match self {
             AnyDecoder::Qwen(d) => d.last_logits_multi(),
-            AnyDecoder::Kimi(_) => &[],
+            AnyDecoder::Kimi(d) => d.last_logits_multi(),
         }
     }
 
     pub fn batch_cap(&self) -> usize {
         match self {
             AnyDecoder::Qwen(d) => d.batch_cap(),
-            AnyDecoder::Kimi(_) => 1,
+            AnyDecoder::Kimi(d) => d.batch_cap(),
         }
     }
 
