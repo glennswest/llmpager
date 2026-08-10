@@ -16,6 +16,9 @@ fn main() -> Result<()> {
         println!("synthetic checkpoint written to {}", dir.display());
         return Ok(());
     }
+    if let Some(f) = arg(&args, "gguf-info") {
+        return llmpager_convert::gguf::info(&PathBuf::from(f));
+    }
     if let Some(dir) = arg(&args, "gen-test-kimi") {
         let dir = PathBuf::from(dir);
         std::fs::create_dir_all(&dir)?;

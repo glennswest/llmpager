@@ -21,6 +21,7 @@ use anyhow::{bail, Context, Result};
 use llmpager_core::pack::{PackMeta, PackWriter};
 use llmpager_core::quant::{q4g64_bytes, q4g64_quantize, GROUP};
 
+pub mod gguf;
 pub mod kimi;
 
 /// Blob layout: this fixed header, then gate, up, down as q4 regions.
