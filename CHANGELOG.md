@@ -1,5 +1,24 @@
 # Changelog
 
+## [v0.16.0] — 2026-08-09
+
+The entropy-coding spike, honestly concluded — plus the pre-warm
+correction.
+
+### Added
+- zstd-compressed packs: per-blob frames, transparent CPU decompression
+  in the io workers, LLMPAGER_COMPRESS=zstd at conversion. Measured
+  -13.0% size (571 -> 496GB, matching the 13.2% entropy ceiling) but
+  -45% single-stream decode (decompress latency on the miss path):
+  a space feature, not a speed lever
+- Fail-loud deploy.sh on the box (a silently failed pull had produced
+  two invalid A/Bs — both retracted and rerun)
+
+### Measured (corrected)
+- Pre-warm is REAL: Kimi 0.58 -> 0.72 tok/s (+24%), prefill +67%,
+  RAM tier 42.6 -> 61.4% hits; serving self-profiles at eviction so
+  this compounds across restarts
+
 ## [v0.15.0] — 2026-08-09
 
 M7-4 complete: lockstep batched decode.

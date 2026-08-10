@@ -10,7 +10,7 @@ the Linux + CUDA equivalent.
 
 ## Version
 
-Current: **0.15.0** (pre-1.0, API unstable)
+Current: **0.16.0** (pre-1.0, API unstable)
 
 Version locations (must all match):
 - `Cargo.toml` — `[workspace.package] version` (all crates inherit it)
