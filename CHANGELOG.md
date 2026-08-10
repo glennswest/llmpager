@@ -293,3 +293,4 @@ streamed from NVMe through a VRAM LFU cache (83% hit rate).
 - **feat:** zstd-compressed packs (M8-5): per-blob frames, transparent CPU decompress in io workers (disk is the wall, not H2D); measured entropy ceiling 13.2%, zstd hits it
 - **feat/docs:** zstd packs shipped + honestly benched (space -13%, speed negative); pre-warm corrected to REAL +24% decode; stale-binary A/B retraction resolved
 - **docs:** Unsloth deep dive — M9 planned: import their Dynamic 2.0 GGUFs (Kimi K2.6 at 350GB = -39%, est +60% decode); K-quant kernels + GGUF converter scoped
+- **docs:** AGENTS.md — Unsloth agent-harness deep dive (Unsloth Start + ART/RULER) and llmpager integration recipe; M9 GGUF reader landed; UD-Q2 download running
