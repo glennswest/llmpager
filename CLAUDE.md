@@ -240,6 +240,31 @@ near-sequential ~9.6GB sweep), uniform blob size (no slot fragmentation).
       first-run OOM at slots=4). Pack per-layer weights into one arena
       alloc each, like the pager slot arenas.
 
+### M9 — Unsloth Dynamic-quant import (assessed 2026-08-09, not started)
+Deep dive on unsloth.ai: their fine-tuning stack/Studio are not relevant
+to us, but **Unsloth Dynamic 2.0 GGUFs are the remaining single-stream
+speed lever**. They publish calibrated, per-tensor mixed-precision quants
+of the exact models we run:
+- Kimi K2.6 UD-Q2_K_XL: **350GB (-39% vs our 571GB int4 pack)** with
+  calibration-tuned quality (attention kept higher-bit); Q4_K_XL ~585GB.
+- Disk-bound math: 350GB pack => ~7.3GB/token worst case vs 12 =>
+  ~+60% decode on top of pre-warm (0.72 -> ~1.15 tok/s est.), RAM tier
+  coverage 14% -> 23% of experts, and 220GB disk back.
+- Kimi K3 (2.8T) exists at 594GB 1-bit-ish / 861GB UD-Q2 — a future
+  option once disk allows; quality at 1-bit needs our PPL gate.
+Adoption plan (when started):
+- [ ] Converter mode: GGUF -> .llmpk (parse GGUF, repack expert tensors
+      preserving GGML K-quant superblocks; per-region dtype tag in the
+      blob header)
+- [ ] Kernels: q2_K / q3_K / q4_K GEMV (port llama.cpp dequant math
+      into our warp-per-row + batched skeleton; verify vs CPU reference)
+- [ ] Core from the same GGUF (their scheme keeps attention high-bit —
+      replaces our blind q4g64 requant with calibrated choices)
+- [ ] PPL gate vs our int4 pack before switching serving
+Also worth imitating cheaply: calibration-guided per-tensor precision
+for our own core requant (their Calibration_v3/v5 insight: chat-template
+data, not wikitext).
+
 ## Session Log
 
 - 2026-08-06 (evening): M3 continued — RAM tier (`--direct=0`, biggest
