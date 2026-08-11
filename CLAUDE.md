@@ -240,7 +240,19 @@ near-sequential ~9.6GB sweep), uniform blob size (no slot fragmentation).
       first-run OOM at slots=4). Pack per-layer weights into one arena
       alloc each, like the pager slot arenas.
 
-### M9 — Unsloth Dynamic-quant import (assessed 2026-08-09, not started)
+### M9 — Unsloth Dynamic-quant import — DEFERRED 2026-08-11
+Parked at user request (higher-priority work). State at parking: GGUF v3
+reader + --gguf-info landed (commit in tree); the UD-Q2 download and ALL
+Kimi artifacts (checkpoint, pack, core) were removed from /data during
+an infra cleanup — /data now has 1.7TB free. To resume M9: re-download
+unsloth/Kimi-K2.6-GGUF UD-Q2_K_XL (350GB), gguf-info to confirm layout,
+then the repack converter + K-quant kernels per the checklist below.
+Note: deploy/serve.json still lists kimi-k2.6 pointing at the deleted
+pack — requests for it will error until re-converted or de-listed.
+New artifacts on /data not from this plan (parallel work): qwen3-235b-
+a22b (downloading?) and qwen3-30b-a3b-x12.llmpk.
+
+### (deferred) M9 original assessment (2026-08-09)
 Deep dive on unsloth.ai: their fine-tuning stack/Studio are not relevant
 to us, but **Unsloth Dynamic 2.0 GGUFs are the remaining single-stream
 speed lever**. They publish calibrated, per-tensor mixed-precision quants
