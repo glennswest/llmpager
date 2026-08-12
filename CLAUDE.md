@@ -279,6 +279,36 @@ data, not wikitext).
 
 ## Session Log
 
+- 2026-08-12: **Qwen3-235B-A22B-Instruct-2507 running on the 16GB card.**
+  Converted 470.2GB bf16 (118 shards) → 121GB pack + 15.99GB core in 364s
+  (94 layers × 128 experts top-8, max quant err 0.21094). `Qwen3MoeForCausalLM`,
+  so the generic converter and decoder handled it with no new model code.
+  - **`core_q4` had to be plumbed into `serve.json`** (`e365b21`): the runtime
+    and CLI already had `--core-dtype=q4`, but `llmpager-serve` passed a
+    hardcoded `false` in that position of `AnyDecoder::new`, so the HTTP path
+    could not serve any model whose bf16 core exceeds VRAM. The 235B core is
+    15.99GB on a 16GB card and OOMed at load.
+  - **`slots=8` is a hard floor, not a tuning choice** — fewer slots than
+    experts-per-token errors out (`requested 8 experts but layer has only 6
+    slots`). With 94 layers the cache costs ~9.8MB × 94 per slot, so `slots=16`
+    OOMs outright; there is almost no headroom above the floor.
+  - Measured at a 1282-token prompt: **prefill 6.17 tok/s, decode 2.30 tok/s**,
+    expert cache 6-10% hit, RAM tier 92.8% hit at `ram_gb=100` (pack is 121GB,
+    box has 125GB). ~5 minutes per case for a 200-token answer.
+  - **Expert-drop is inert on this model** — 0.05 and 0.10 both streamed
+    byte-identical 1219.62GB. Independently reproduces the M8 finding.
+  - **Diagnosis: host-to-device bandwidth bound, not disk bound.** ~7.4GB moves
+    per token (94 layers × 8 experts × ~9.8MB); against the M0-measured 25.3GB/s
+    pinned H2D that is a ~3.4 tok/s ceiling, and 2.30 is 68% of it. Cache and
+    routing knobs cannot help; only fewer bytes per token can — lower-bit expert
+    quantization (M9 K-quants) or batching, which amortizes each transfer across
+    N sequences. **Batch scaling on this model was never measured** (first
+    attempt passed `--batch-selftest` without `--batch`, so the cap stayed 1;
+    the rerun was stopped when work was parked). That remains the open lever.
+  - Site note: the WAN is ~100 Mbit and shared, so the 470GB pull took 9h54m.
+    Source precision is a bandwidth decision here, not only a quality one — FP8
+    (236GB) or AWQ (124GB) would cut that 2-4x if the converter learns them.
+
 - 2026-08-06 (evening): M3 continued — RAM tier (`--direct=0`, biggest
   single win: cold prompts 20→32 tok/s, peak 37.6), batched MoE, prefill
   lm_head skip; core-q4 and cross-layer prefetch measured and rejected
