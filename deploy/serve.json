@@ -19,6 +19,20 @@
       "slots": 24,
       "direct": false,
       "batch": 4
+    },
+    {
+      "name": "qwen3-235b-a22b",
+      "pack": "/data/models/qwen3-235b-a22b.llmpk",
+      "core": "/data/models/qwen3-235b-a22b.core.safetensors",
+      "tokenizer": "/data/models/qwen3-235b-a22b",
+      "slots": 8,
+      "slots_solo": 8,
+      "core_q4": true,
+      "direct": false,
+      "ram_gb": 100,
+      "max_seq": 4096,
+      "batch": 4,
+      "io_threads": 8
     }
   ]
 }

@@ -37,6 +37,10 @@ struct ModelSpec {
     direct: bool,
     /// Managed host-RAM expert tier (GB); for packs larger than RAM.
     ram_gb: f64,
+    /// Requantize the resident core to q4g64 at load. Required for models
+    /// whose bf16 core alone exceeds VRAM (the 235B core is 16GB on a 16GB
+    /// card); harmless but lossy elsewhere, so it defaults off.
+    core_q4: bool,
     max_seq: usize,
     batch: usize,
     /// Skip routed experts under this scaled weight (kimi fetch saver).
@@ -125,7 +129,7 @@ impl Registry {
                 .map_err(|e| anyhow::anyhow!("loading {}: {e}", tok_file.display()))?;
             let dec = AnyDecoder::new(
                 &spec.pack, &spec.core, slots, spec.io_threads, spec.max_seq,
-                false, spec.direct, (spec.ram_gb * 1e9) as u64, spec.batch,
+                spec.core_q4, spec.direct, (spec.ram_gb * 1e9) as u64, spec.batch,
             )?;
             let mut dec = dec;
             dec.set_min_expert_weight(spec.min_expert_weight as f32);
@@ -445,6 +449,7 @@ fn main() -> Result<()> {
                 io_threads: m["io_threads"].as_u64().unwrap_or(4) as usize,
                 direct: m["direct"].as_bool().unwrap_or(false),
                 ram_gb: m["ram_gb"].as_f64().unwrap_or(0.0),
+                core_q4: m["core_q4"].as_bool().unwrap_or(false),
                 max_seq: m["max_seq"].as_u64().unwrap_or(4096) as usize,
                 batch: m["batch"].as_u64().unwrap_or(1) as usize,
                 min_expert_weight: m["min_expert_weight"].as_f64().unwrap_or(0.0),
