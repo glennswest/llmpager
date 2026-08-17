@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### 2026-08-17
+- **fix:** Serving deadlock — the second request on a warm Qwen-family
+  model hung forever. `Decoder::step`'s deferred-release ring left up to
+  8 layers' worth of expert handles pinned when a generation ended, and
+  only `step` drains that ring; the next request's union prefill fetches
+  in waves sized to the whole layer, so its first wave over one of those
+  layers stalled on slots held by the very thread that was waiting.
+  `step_multi` now flushes the ring before fetching. Kimi was unaffected
+  (it releases eagerly everywhere)
+- **fix:** `Pager::request` no longer waits forever on a fully-pinned
+  layer: after a 10s grace it checks for in-flight fills and, finding
+  none, errors with a diagnostic instead of hanging the server
+- **test:** `--serial-selftest=N` runs N complete generations (prefill +
+  decode) on one decoder and requires identical output — the multi-request
+  shape a server sees, which single-shot CLI runs never exercised
+
 ## [v0.16.0] — 2026-08-09
 
 The entropy-coding spike, honestly concluded — plus the pre-warm

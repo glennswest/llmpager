@@ -17,13 +17,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use llmpager_core::cache::{ExpertCache, Lookup};
 use llmpager_core::pack::{PackReader, ALIGN};
 
 use crate::driver::{CUdeviceptr, CUevent, CUstream, Cuda};
+
+/// How long `request` waits on a fully-pinned layer before checking whether
+/// any fetch is still in flight to release it. Long enough that a healthy
+/// pipeline never reaches it, short enough to turn a hang into an error.
+const STALL_GRACE: Duration = Duration::from_secs(10);
 
 pub struct PagerConfig {
     pub slots_per_layer: u32,
@@ -333,7 +338,29 @@ impl Pager {
                         break slot;
                     }
                     Lookup::Stalled => {
-                        let _unused = self.shared.cv.wait(st).unwrap();
+                        // Every slot in the layer is pinned. The only
+                        // releases that can arrive without us doing anything
+                        // come from fills still in flight; with none in
+                        // flight this wait would never end (a caller holding
+                        // handles across a forward pass). Silently hanging
+                        // the server is the worst failure mode available, so
+                        // wait a grace period and then say what happened.
+                        let (guard, res) =
+                            self.shared.cv.wait_timeout(st, STALL_GRACE).unwrap();
+                        st = guard;
+                        if res.timed_out() {
+                            let base = self.shared.idx(layer, 0);
+                            let n = self.shared.slots_per_layer as usize;
+                            let in_flight =
+                                st.fill[base..base + n].iter().any(|f| *f == Fill::InFlight);
+                            if !in_flight {
+                                bail!(
+                                    "expert cache deadlock: all {n} slots of layer {layer} are \
+                                     pinned with no fetch in flight — expert handles were held \
+                                     across a forward pass"
+                                );
+                            }
+                        }
                     }
                 }
             };

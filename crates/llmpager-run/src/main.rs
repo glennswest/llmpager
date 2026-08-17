@@ -142,6 +142,50 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Serial self-test: N complete generations (prefill + decode) back to
+    // back on one decoder — the shape a server sees, which a single CLI run
+    // never exercises. Regression guard for the deferred-release ring
+    // leaking pins across generations: the second prefill then stalled
+    // forever on slots the same thread held. Greedy, so all runs must match.
+    if let Some(runs) = arg(&args, "serial-selftest").and_then(|v| v.parse::<usize>().ok()) {
+        let mut first: Option<Vec<u32>> = None;
+        for r in 0..runs {
+            let t0 = Instant::now();
+            let mut next = 0u32;
+            let mut pos = 0usize;
+            for chunk in prompt_ids.chunks(dec.chunk_cap()) {
+                let last = pos + chunk.len() == prompt_ids.len();
+                next = dec.step_chunk(chunk, pos, last)?;
+                pos += chunk.len();
+            }
+            let mut out: Vec<u32> = Vec::new();
+            for i in 0..max_tokens {
+                if dec.eos().contains(&next) {
+                    break;
+                }
+                out.push(next);
+                let p = prompt_ids.len() + i;
+                if p >= max_seq {
+                    break;
+                }
+                next = dec.step(next, p, true)?;
+            }
+            eprintln!(
+                "run {} of {runs}: {} tokens in {:.2}s",
+                r + 1,
+                out.len(),
+                t0.elapsed().as_secs_f64()
+            );
+            match &first {
+                None => first = Some(out),
+                Some(f) if *f == out => {}
+                Some(f) => bail!("run {} diverged from run 1:\n  {f:?}\n  {out:?}", r + 1),
+            }
+        }
+        eprintln!("serial-selftest PASS: {runs} identical generations on one decoder");
+        return Ok(());
+    }
+
     // Perplexity mode: teacher-forced NLL over a text file. Validates the
     // whole pipeline numerically — and PPL must be identical across cache
     // sizes if paging is lossless.

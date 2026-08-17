@@ -375,6 +375,13 @@ impl Decoder {
                 bail!("sequence slot {seq} exceeds batch cap {}", self.batch_cap);
             }
         }
+        // Waves below are sized to the whole layer, so this path can only
+        // make progress from a clean pin state. A generation that ended in
+        // `step` leaves up to `release_events.len()` layers' worth of
+        // handles pinned in the deferred ring, and nothing here would ever
+        // drain them — the first wave over one of those layers would stall
+        // on slots this very thread holds, forever. Drain the ring first.
+        self.flush_pending_release()?;
         let c = self.cfg.clone();
         let cu = Arc::clone(&self.cuda);
         let cu = &*cu;
@@ -596,6 +603,20 @@ impl Decoder {
         self.next_event = (self.next_event + 1) % self.release_events.len();
         self.cuda.record_event(self.release_events[ev], self.stream)?;
         self.pending_release.push_back((ev, handles));
+        Ok(())
+    }
+
+    /// Release every handle still queued in the deferred ring, waiting on
+    /// each recorded event first. Restores the "this decoder pins nothing"
+    /// invariant that `step_multi`'s wave fetching depends on.
+    fn flush_pending_release(&mut self) -> Result<()> {
+        while let Some((ev_idx, _)) = self.pending_release.front() {
+            self.cuda.sync_event(self.release_events[*ev_idx])?;
+            let (_, done) = self.pending_release.pop_front().unwrap();
+            for h in done {
+                self.pager.as_ref().unwrap().release(h);
+            }
+        }
         Ok(())
     }
 }
