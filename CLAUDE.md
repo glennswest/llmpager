@@ -277,6 +277,32 @@ Also worth imitating cheaply: calibration-guided per-tensor precision
 for our own core requant (their Calibration_v3/v5 insight: chat-template
 data, not wikitext).
 
+### M10 — Multi-session serving (KV store) — in progress 2026-08-17
+One warm model, many independent contexts. Today every request re-prefills
+from position 0 on sequence slot 0, so the same model cannot hold two
+purposes at once and every chat turn re-pages the whole conversation.
+The kernels already isolate sequences (`step_multi` takes a seq slot and
+per-slot KV regions); what is missing is identity, persistence, and reuse.
+- [ ] 1. Decoder KV export/import: `kv_export(slot, len)` / `kv_import`
+      on both engines. Qwen slot layout is [kv_heads, max_seq, head_dim]
+      (strided prefix copy); Kimi's MLA cache is [max_seq, qk] (one
+      contiguous run). ~96KB/token for qwen3-30b, ~192KB/token for 235B.
+- [ ] 2. `SessionStore` per warm model: session id -> {tokens, VRAM seq
+      slot | host-RAM blob}. LRU over the `batch_cap` VRAM slots, then
+      LRU over a host-RAM budget (`session_ram_gb`). Restoring a session
+      is an H2D copy (~10ms) versus seconds of re-prefill paging.
+- [ ] 3. Prefix reuse: longest common prefix between the session's stored
+      tokens and the new prompt is kept; only the divergent suffix is
+      prefilled. Serves both continuation (chat) and shared-prefix fan-out
+      (slidemaker sends every slide behind one system prompt).
+- [ ] 4. API: `session` field on completions/chat; GET/DELETE /v1/sessions.
+- [ ] 5. `--session-selftest`: prefix-reused output must be bit-identical
+      to a full prefill, and KV export/import must round-trip.
+- [ ] 6. (deferred) Continuous batching so sessions decode *concurrently*
+      in lockstep, sharing every expert fetch — the throughput lever on
+      H2D-bound models. Needs a scheduler thread owning the decoder; the
+      session slot machinery above is its prerequisite.
+
 ## Session Log
 
 - 2026-08-17: **Serving deadlock fixed (v0.17.0).** Reported as "llmpager
