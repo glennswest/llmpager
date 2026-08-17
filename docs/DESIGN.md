@@ -46,6 +46,18 @@ are pinned; the pager then blocks on an event instead of thrashing.
 Frequency counters halve every N insertions — an expert hot early in a long
 generation decays away instead of squatting.
 
+**Pin lifetime invariant.** A `Stalled` layer can only be unblocked by
+someone releasing a pin, so a caller must never enter a fetch that needs
+more slots than it can free itself. Decode defers release through a small
+event ring (a handle stays pinned until the compute stream passes it);
+union prefill fetches in waves sized to the *whole* layer and releases
+eagerly. Mixing the two is the trap: a decode-ended generation leaves ring
+entries pinned, and the next prefill's first wave over one of those layers
+waits on slots its own thread holds — a single-threaded deadlock (fixed in
+v0.17.0 by flushing the ring at `step_multi` entry). `Pager::request` now
+treats "fully pinned with nothing in flight" as an error rather than
+waiting forever, so any future violation reports itself instead of hanging.
+
 ### Pager (M1) — CUDA side
 
 - One device buffer per (layer, slot): the cache's backing store.

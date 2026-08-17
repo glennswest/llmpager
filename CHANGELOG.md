@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
-### 2026-08-17
+## [v0.17.0] — 2026-08-17
+
+The serving deadlock: one request per warm model, then silence.
+
+### Fixed
 - **fix:** Serving deadlock — the second request on a warm Qwen-family
   model hung forever. `Decoder::step`'s deferred-release ring left up to
   8 layers' worth of expert handles pinned when a generation ended, and
@@ -14,9 +18,17 @@
 - **fix:** `Pager::request` no longer waits forever on a fully-pinned
   layer: after a 10s grace it checks for in-flight fills and, finding
   none, errors with a diagnostic instead of hanging the server
-- **test:** `--serial-selftest=N` runs N complete generations (prefill +
-  decode) on one decoder and requires identical output — the multi-request
-  shape a server sees, which single-shot CLI runs never exercised
+
+### Added
+- `--serial-selftest=N`: N complete generations (prefill + decode) on one
+  decoder, requiring identical output — the multi-request shape a server
+  sees, which single-shot CLI runs never exercised
+
+### Verified on ai.g8.lo
+- 194-token prompt, 4 sequential HTTP requests: 3.98 / 3.77 / 3.74 / 3.84s
+  (request 2 previously hung forever — 0% CPU, 0% GPU, no I/O)
+- chat, SSE streaming, and n>1 batch paths all repeat cleanly
+- `--serial-selftest=3` PASS at slots=8, the tightest configuration
 
 ## [v0.16.0] — 2026-08-09
 

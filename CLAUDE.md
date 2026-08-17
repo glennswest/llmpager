@@ -10,7 +10,7 @@ the Linux + CUDA equivalent.
 
 ## Version
 
-Current: **0.16.0** (pre-1.0, API unstable)
+Current: **0.17.0** (pre-1.0, API unstable)
 
 Version locations (must all match):
 - `Cargo.toml` — `[workspace.package] version` (all crates inherit it)
@@ -278,6 +278,34 @@ for our own core requant (their Calibration_v3/v5 insight: chat-template
 data, not wikitext).
 
 ## Session Log
+
+- 2026-08-17: **Serving deadlock fixed (v0.17.0).** Reported as "llmpager
+  hangs when using it"; reproduced as *one request per warm model, then
+  silence*. Discriminating measurement: while wedged the process burned
+  **2 CPU ticks in 20s** (0.1% of a core) with GPU 0% and `read_bytes`
+  flat, and 9 threads parked in `futex_wait_queue` — a deadlock, not a
+  spin. (Cumulative `systemd` CPU accounting looks like spinning and is
+  not evidence either way.) Sharp test: the *identical* 194-token prompt
+  succeeds as request 1 and hangs as request 2, so the bug is carried
+  state, not input.
+  - Root cause: `Decoder::step` defers expert-handle release through an
+    8-event ring, and only `step` drains it — so a generation that ends
+    in decode leaves up to 8 layers' worth of slots pinned indefinitely.
+    The next request opens with union prefill, which fetches each layer's
+    expert union in waves sized to the *whole* layer; the first wave over
+    a still-pinned layer stalls in `Pager::request` on slots held by the
+    very thread doing the waiting. Tiny prompts survived because their
+    per-layer union fit in the slots that were left.
+  - Fix: `step_multi` flushes the deferred ring before fetching. Kimi's
+    decoder was never affected (eager release on every path).
+  - Guard: `Pager::request` waits a 10s grace, then errors if the layer
+    is fully pinned with nothing in flight — this class of bug can no
+    longer present as a silent hang.
+  - Ops note: `cargo build --release` on the box builds **nothing
+    relevant** — `default-members` excludes llmpager-run/-serve (they
+    need nvcc), and it exits "Finished" in 1.4s. Always deploy with
+    `~/deploy.sh llmpager-run llmpager-serve`, then verify the running
+    binary (`strings /proc/$(systemctl show llmpager -p MainPID --value)/exe`).
 
 - 2026-08-12: **Qwen3-235B-A22B-Instruct-2507 running on the 16GB card.**
   Converted 470.2GB bf16 (118 shards) → 121GB pack + 15.99GB core in 364s
