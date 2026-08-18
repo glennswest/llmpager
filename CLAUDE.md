@@ -247,8 +247,8 @@ Kimi artifacts (checkpoint, pack, core) were removed from /data during
 an infra cleanup — /data now has 1.7TB free. To resume M9: re-download
 unsloth/Kimi-K2.6-GGUF UD-Q2_K_XL (350GB), gguf-info to confirm layout,
 then the repack converter + K-quant kernels per the checklist below.
-Note: deploy/serve.json still lists kimi-k2.6 pointing at the deleted
-pack — requests for it will error until re-converted or de-listed.
+Note: kimi-k2.6 was de-listed from deploy/serve.json in 1647437, so the
+serving config is clean; re-adding it requires re-converting the pack.
 New artifacts on /data not from this plan (parallel work): qwen3-235b-
 a22b (downloading?) and qwen3-30b-a3b-x12.llmpk.
 
