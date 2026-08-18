@@ -203,8 +203,9 @@ fn main() -> Result<()> {
             slot: usize,
             ids: &[u32],
             from: usize,
+            cap: usize,
         ) -> Result<Vec<f32>> {
-            let cap = dec.chunk_cap();
+            let cap = cap.min(dec.chunk_cap()).max(1);
             let mut pos = from;
             for chunk in ids[from..].chunks(cap) {
                 let entries: Vec<(u32, usize, usize)> =
@@ -221,25 +222,31 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|| dec.last_logits()))
         }
 
-        let l_fresh = prefill_logits(&mut dec, 0, &prompt_ids, 0)?;
-        prefill_logits(&mut dec, 1, &prompt_ids[..split], 0)?;
-        let l_reuse = prefill_logits(&mut dec, 1, &prompt_ids, split)?;
-        let dmax = l_fresh
-            .iter()
-            .zip(&l_reuse)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
-        let scale = l_fresh.iter().fold(0f32, |m, v| m.max(v.abs()));
-        let am = |v: &[f32]| {
-            v.iter().enumerate().fold((0usize, f32::MIN), |(bi, bv), (i, &x)| {
-                if x > bv { (i, x) } else { (bi, bv) }
-            }).0
+        let delta = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max)
         };
+        let am = |v: &[f32]| {
+            v.iter()
+                .enumerate()
+                .fold((0usize, f32::MIN), |(bi, bv), (i, &x)| if x > bv { (i, x) } else { (bi, bv) })
+                .0
+        };
+        // A: one chunk. B: same context from scratch, chunked at `split`.
+        // C: prefix reuse, resuming at `split`. A/B isolates chunk grouping
+        // alone; B/C isolates what reuse itself changes.
+        let l_a = prefill_logits(&mut dec, 0, &prompt_ids, 0, usize::MAX)?;
+        let l_b = prefill_logits(&mut dec, 1, &prompt_ids, 0, split)?;
+        prefill_logits(&mut dec, 1, &prompt_ids[..split], 0, usize::MAX)?;
+        let l_c = prefill_logits(&mut dec, 1, &prompt_ids, split, usize::MAX)?;
+        let scale = l_a.iter().fold(0f32, |m, v| m.max(v.abs()));
         eprintln!(
-            "prefix-reuse logits: max |delta| {dmax:.5} on a scale of {scale:.2} ({:.4}%),              argmax {} vs {}",
-            100.0 * dmax / scale.max(1e-9),
-            am(&l_fresh),
-            am(&l_reuse),
+            "logit deltas (scale {scale:.2}): grouping A/B {:.5}, reuse B/C {:.5}, A/C {:.5}; argmax {} {} {}",
+            delta(&l_a, &l_b),
+            delta(&l_b, &l_c),
+            delta(&l_a, &l_c),
+            am(&l_a),
+            am(&l_b),
+            am(&l_c),
         );
 
         // Staged, so a failure names the property that broke.
