@@ -78,6 +78,30 @@ impl AnyDecoder {
         }
     }
 
+    /// Host cost of one token of parked session context.
+    pub fn kv_bytes_per_token(&self) -> usize {
+        match self {
+            AnyDecoder::Qwen(d) => d.kv_bytes_per_token(),
+            AnyDecoder::Kimi(d) => d.kv_bytes_per_token(),
+        }
+    }
+
+    /// Park sequence slot `seq`'s KV for positions [0, len) in host memory.
+    pub fn kv_export(&self, seq: usize, len: usize) -> Result<Vec<u8>> {
+        match self {
+            AnyDecoder::Qwen(d) => d.kv_export(seq, len),
+            AnyDecoder::Kimi(d) => d.kv_export(seq, len),
+        }
+    }
+
+    /// Restore a parked context into slot `seq`.
+    pub fn kv_import(&mut self, seq: usize, len: usize, blob: &[u8]) -> Result<()> {
+        match self {
+            AnyDecoder::Qwen(d) => d.kv_import(seq, len, blob),
+            AnyDecoder::Kimi(d) => d.kv_import(seq, len, blob),
+        }
+    }
+
     pub fn batch_cap(&self) -> usize {
         match self {
             AnyDecoder::Qwen(d) => d.batch_cap(),

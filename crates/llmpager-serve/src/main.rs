@@ -48,6 +48,9 @@ struct ModelSpec {
     /// Fetch-count profile file: loaded into the RAM tier at warm-up,
     /// rewritten with fresh stats at eviction (self-improving).
     prewarm: Option<PathBuf>,
+    /// Host RAM for parked session contexts (GB). Sessions evicted from a
+    /// VRAM sequence slot keep their KV here instead of re-prefilling.
+    session_ram_gb: f64,
 }
 
 struct Engine {
@@ -55,6 +58,193 @@ struct Engine {
     tok: tokenizers::Tokenizer,
     cur_slots: u32,
     max_seq: usize,
+    sessions: SessionStore,
+}
+
+impl Engine {
+    /// Give `id` a sequence slot and report how much of `prompt` its KV
+    /// already covers. Borrows two disjoint fields, so it has to be a
+    /// method rather than a free function.
+    fn acquire_session(&mut self, id: &str, prompt: &[u32]) -> Result<(usize, usize)> {
+        self.sessions.acquire(&mut self.dec, id, prompt)
+    }
+}
+
+/// One named context: the tokens whose KV we hold, and where that KV lives.
+/// Position i of the cache holds the state for `tokens[..=i]`, so any prompt
+/// sharing a prefix with `tokens` can skip prefilling that prefix.
+struct Session {
+    tokens: Vec<u32>,
+    /// Resident VRAM sequence slot, if any.
+    slot: Option<usize>,
+    /// Host-parked KV covering `tokens`; set exactly when `slot` is None
+    /// and the context survived eviction.
+    parked: Option<Vec<u8>>,
+    last_used: u64,
+    turns: u64,
+}
+
+/// Per-model session store. The decoder has `batch_cap` sequence slots;
+/// slot 0 stays the anonymous lane (sessionless requests decode there, as
+/// they always have), so sessions occupy slots 1.. and never collide with
+/// legacy traffic. Sessions evicted from a slot are parked in host RAM,
+/// which costs a copy of a few hundred MB/s instead of seconds of expert
+/// paging to re-prefill.
+struct SessionStore {
+    map: std::collections::HashMap<String, Session>,
+    /// owner[i] holds the session using sequence slot i + 1.
+    owner: Vec<Option<String>>,
+    ram_budget: usize,
+    clock: u64,
+}
+
+fn common_prefix(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
+impl SessionStore {
+    fn new(batch_cap: usize, ram_budget: usize) -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            owner: (0..batch_cap.saturating_sub(1)).map(|_| None).collect(),
+            ram_budget,
+            clock: 0,
+        }
+    }
+
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
+    }
+
+    fn parked_bytes(&self) -> usize {
+        self.map.values().filter_map(|s| s.parked.as_ref().map(|b| b.len())).sum()
+    }
+
+    /// Give `id` a slot and report (seq_slot, reusable prefix length).
+    fn acquire(
+        &mut self,
+        dec: &mut AnyDecoder,
+        id: &str,
+        prompt: &[u32],
+    ) -> Result<(usize, usize)> {
+        if self.owner.is_empty() {
+            bail!(
+                "sessions need at least 2 sequence slots; raise `batch` for this \
+                 model in serve.json (slot 0 is the sessionless lane)"
+            );
+        }
+        let now = self.tick();
+        let e = self.map.entry(id.to_string()).or_insert_with(|| Session {
+            tokens: Vec::new(),
+            slot: None,
+            parked: None,
+            last_used: now,
+            turns: 0,
+        });
+        e.last_used = now;
+        // Always leave one token to run: the forward pass over it is what
+        // produces the logits the first new token is sampled from.
+        let mut reuse =
+            common_prefix(&e.tokens, prompt).min(prompt.len().saturating_sub(1));
+        let stored_len = e.tokens.len();
+        let resident = e.slot;
+        let parked = if resident.is_none() { e.parked.take() } else { None };
+
+        let slot = match resident {
+            Some(s) => s,
+            None => {
+                let s = self.claim_slot(dec, id)?;
+                match parked {
+                    // Restoring costs one H2D copy; re-prefilling costs
+                    // seconds of expert paging.
+                    Some(blob) if reuse > 0 => dec.kv_import(s, stored_len, &blob)?,
+                    _ => reuse = 0,
+                }
+                s
+            }
+        };
+        let e = self.map.get_mut(id).expect("just inserted");
+        e.slot = Some(slot);
+        if reuse == 0 {
+            e.tokens.clear();
+        }
+        Ok((slot, reuse))
+    }
+
+    /// A free sequence slot, parking the least recently used session if
+    /// every slot is taken.
+    fn claim_slot(&mut self, dec: &mut AnyDecoder, for_id: &str) -> Result<usize> {
+        if let Some(i) = self.owner.iter().position(|o| o.is_none()) {
+            self.owner[i] = Some(for_id.to_string());
+            return Ok(i + 1);
+        }
+        let victim = self
+            .owner
+            .iter()
+            .flatten()
+            .min_by_key(|id| self.map.get(*id).map(|s| s.last_used).unwrap_or(0))
+            .cloned()
+            .context("no session slots")?;
+        self.park(dec, &victim)?;
+        let i = self.owner.iter().position(|o| o.is_none()).context("park freed no slot")?;
+        self.owner[i] = Some(for_id.to_string());
+        Ok(i + 1)
+    }
+
+    /// Copy a session's KV out of VRAM into host RAM and free its slot.
+    fn park(&mut self, dec: &mut AnyDecoder, id: &str) -> Result<()> {
+        let Some(s) = self.map.get(id) else { return Ok(()) };
+        let (Some(slot), len) = (s.slot, s.tokens.len()) else { return Ok(()) };
+        let blob = if len > 0 { Some(dec.kv_export(slot, len)?) } else { None };
+        let s = self.map.get_mut(id).expect("checked above");
+        s.parked = blob;
+        s.slot = None;
+        self.owner[slot - 1] = None;
+        self.enforce_budget();
+        Ok(())
+    }
+
+    /// Drop parked contexts, least recently used first, until the host
+    /// budget is met. A dropped context loses its KV, so its token list
+    /// goes too — otherwise we would claim reuse we cannot honour.
+    fn enforce_budget(&mut self) {
+        while self.parked_bytes() > self.ram_budget {
+            let victim = self
+                .map
+                .iter()
+                .filter(|(_, s)| s.parked.is_some())
+                .min_by_key(|(_, s)| s.last_used)
+                .map(|(id, _)| id.clone());
+            let Some(id) = victim else { break };
+            if let Some(s) = self.map.get_mut(&id) {
+                s.parked = None;
+                s.tokens.clear();
+            }
+        }
+    }
+
+    /// Record the context a finished generation leaves in the slot.
+    fn commit(&mut self, id: &str, tokens: Vec<u32>) {
+        let now = self.tick();
+        if let Some(s) = self.map.get_mut(id) {
+            s.tokens = tokens;
+            s.turns += 1;
+            s.last_used = now;
+        }
+    }
+
+    fn forget(&mut self, id: &str) -> bool {
+        match self.map.remove(id) {
+            Some(s) => {
+                if let Some(slot) = s.slot {
+                    self.owner[slot - 1] = None;
+                }
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 struct Registry {
@@ -147,7 +337,9 @@ impl Registry {
                     }
                 }
             }
-            Ok(Engine { dec, tok, cur_slots: slots, max_seq: spec.max_seq })
+            let sessions =
+                SessionStore::new(dec.batch_cap(), (spec.session_ram_gb * 1e9) as usize);
+            Ok(Engine { dec, tok, cur_slots: slots, max_seq: spec.max_seq, sessions })
         };
         let engine = match load(&spec, slots) {
             Ok(e) => e,
@@ -236,6 +428,100 @@ fn generate(
         .decode(&out_ids, true)
         .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
     Ok((text, ids.len(), out_ids.len(), t0.elapsed().as_secs_f64()))
+}
+
+fn tokenize(engine: &Engine, prompt: &str) -> Result<Vec<u32>> {
+    let ids = engine
+        .tok
+        .encode(prompt, false)
+        .map_err(|e| anyhow::anyhow!("encode: {e}"))?
+        .get_ids()
+        .to_vec();
+    if ids.is_empty() {
+        bail!("empty prompt after tokenization");
+    }
+    Ok(ids)
+}
+
+/// Generate inside a session: decode on the session's own sequence slot,
+/// prefilling only the part of the prompt its KV does not already cover.
+/// Returns (text, full context after this turn, prefilled, generated, secs).
+#[allow(clippy::too_many_arguments)]
+fn generate_session(
+    engine: &mut Engine,
+    slot: usize,
+    reuse: usize,
+    ids: &[u32],
+    max_tokens: usize,
+    sampling: &Sampling,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+) -> Result<(String, Vec<u32>, usize, usize, f64)> {
+    let t0 = Instant::now();
+    let cap = engine.dec.chunk_cap();
+    let plain_greedy = sampling.is_greedy() && sampling.repeat_penalty == 1.0;
+    let mut rng = SampleRng::new(sampling.seed);
+    let mut next = 0u32;
+
+    // Prefill the divergent suffix only. Positions before `reuse` keep the
+    // KV the session already holds; stale entries after the new context are
+    // harmless, since every position is rewritten before it is attended to.
+    let mut pos = reuse;
+    for chunk in ids[reuse..].chunks(cap) {
+        let entries: Vec<(u32, usize, usize)> =
+            chunk.iter().enumerate().map(|(i, t)| (*t, pos + i, slot)).collect();
+        let last = pos + chunk.len() == ids.len();
+        let out = engine.dec.step_multi(&entries, last)?;
+        if last {
+            next = *out.last().context("prefill produced no token")?;
+            if !plain_greedy {
+                if let Some(l) =
+                    engine.dec.last_logits_multi_or_single().last().filter(|l| !l.is_empty())
+                {
+                    next = sample(l, &[], sampling, &mut rng);
+                }
+            }
+        }
+        pos += chunk.len();
+    }
+
+    let mut out_ids: Vec<u32> = Vec::new();
+    let mut printed = String::new();
+    for i in 0..max_tokens {
+        if engine.dec.eos().contains(&next) {
+            break;
+        }
+        out_ids.push(next);
+        if let Some(cb) = on_delta.as_deref_mut() {
+            let full = engine
+                .tok
+                .decode(&out_ids, true)
+                .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+            if full.len() > printed.len() {
+                cb(&full[printed.len()..]);
+                printed = full;
+            }
+        }
+        let p = ids.len() + i;
+        if p + 1 >= engine.max_seq {
+            break;
+        }
+        let out = engine.dec.step_multi(&[(next, p, slot)], true)?;
+        next = if plain_greedy {
+            out[0]
+        } else {
+            let lm = engine.dec.last_logits_multi_or_single();
+            sample(&lm[0], &out_ids, sampling, &mut rng)
+        };
+    }
+    let text = engine
+        .tok
+        .decode(&out_ids, true)
+        .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+    // The KV now covers prompt + everything generated: each generated token
+    // was fed back through `step_multi` before the next was produced.
+    let mut context = ids.to_vec();
+    context.extend_from_slice(&out_ids);
+    Ok((text, context, ids.len() - reuse, out_ids.len(), t0.elapsed().as_secs_f64()))
 }
 
 /// Lockstep batch generation: N prompts decode together on independent
@@ -454,6 +740,7 @@ fn main() -> Result<()> {
                 batch: m["batch"].as_u64().unwrap_or(1) as usize,
                 min_expert_weight: m["min_expert_weight"].as_f64().unwrap_or(0.0),
                 prewarm: m["prewarm"].as_str().map(PathBuf::from),
+                session_ram_gb: m["session_ram_gb"].as_f64().unwrap_or(8.0),
             })
         })
         .collect::<Result<_>>()?;
@@ -534,6 +821,13 @@ fn handle(
             let max_tokens =
                 req["max_tokens"].as_u64().unwrap_or(if chat { 256 } else { 128 }) as usize;
             let sampling = sampling_from_request(&req);
+            // A named context. Two requests naming the same session share
+            // KV: continuations skip re-prefilling the conversation, and
+            // fan-outs behind one system prompt skip re-prefilling it.
+            let session = req["session"]
+                .as_str()
+                .or_else(|| req["session_id"].as_str())
+                .map(String::from);
             // The chat template depends on the engine, so warm it first.
             let kimi = {
                 let mut r = registry.lock().unwrap();
@@ -556,6 +850,12 @@ fn handle(
                     _ => None,
                 };
                 if let Some(prompts) = prompts {
+                    if let Some(sid) = &session {
+                        bail!(
+                            "session {sid:?} cannot be combined with a prompt array or n>1: \
+                             batch streams occupy the sequence slots sessions live in"
+                        );
+                    }
                     let t0 = Instant::now();
                     let mut r = registry.lock().unwrap();
                     r.warm_up(&model)?;
@@ -610,6 +910,18 @@ fn handle(
                     }
                     let engine = &mut r.warm[0].1;
                     let obj = if chat { "chat.completion.chunk" } else { "text_completion" };
+                    let sess = match &session {
+                        Some(sid) => match tokenize(engine, &prompt)
+                            .and_then(|ids| Ok((engine.acquire_session(sid, &ids)?, ids)))
+                        {
+                            Ok(((slot, reuse), ids)) => Some((sid.clone(), slot, reuse, ids)),
+                            Err(e) => {
+                                send(&serde_json::json!({"error": {"message": format!("{e:#}")}}));
+                                return;
+                            }
+                        },
+                        None => None,
+                    };
                     if chat {
                         send(&serde_json::json!({"object": obj, "model": model,
                             "choices": [{"index": 0, "delta": {"role": "assistant"}}]}));
@@ -623,7 +935,19 @@ fn handle(
                         send(&serde_json::json!({"object": obj, "model": model,
                                                   "choices": [choice]}));
                     };
-                    match generate(engine, &prompt, max_tokens, &sampling, Some(&mut cb)) {
+                    let result = match &sess {
+                        Some((sid, slot, reuse, ids)) => generate_session(
+                            engine, *slot, *reuse, ids, max_tokens, &sampling, Some(&mut cb),
+                        )
+                        .map(|(_, ctx, prefilled, c, secs)| {
+                            let p = ids.len();
+                            engine.sessions.commit(sid, ctx);
+                            let _ = prefilled;
+                            (String::new(), p, c, secs)
+                        }),
+                        None => generate(engine, &prompt, max_tokens, &sampling, Some(&mut cb)),
+                    };
+                    match result {
                         Ok((_, p, c, secs)) => {
                             let done_choice = if chat {
                                 serde_json::json!({"index": 0, "delta": {}, "finish_reason": "stop"})
@@ -649,11 +973,33 @@ fn handle(
             let mut r = registry.lock().unwrap();
             r.warm_up(&model)?;
             let engine = &mut r.warm[0].1;
-            let (text, p_toks, c_toks, secs) = generate(engine, &prompt, max_tokens, &sampling, None)?;
+            let (text, p_toks, c_toks, secs, sess_info) = match &session {
+                Some(sid) => {
+                    let ids = tokenize(engine, &prompt)?;
+                    let (slot, reuse) = engine.acquire_session(sid, &ids)?;
+                    let (text, ctx, prefilled, c, secs) = generate_session(
+                        engine, slot, reuse, &ids, max_tokens, &sampling, None,
+                    )?;
+                    engine.sessions.commit(sid, ctx);
+                    let info = serde_json::json!({"session": sid, "slot": slot,
+                        "prompt_tokens_reused": reuse,
+                        "prompt_tokens_prefilled": prefilled});
+                    (text, ids.len(), c, secs, Some(info))
+                }
+                None => {
+                    let (t, p, c, s) = generate(engine, &prompt, max_tokens, &sampling, None)?;
+                    (t, p, c, s, None)
+                }
+            };
             let usage = serde_json::json!({"prompt_tokens": p_toks,
                 "completion_tokens": c_toks, "total_tokens": p_toks + c_toks});
-            let perf = serde_json::json!({"seconds": secs,
+            let mut perf = serde_json::json!({"seconds": secs,
                 "tok_per_sec": c_toks as f64 / secs.max(1e-9)});
+            if let (Some(info), Some(obj)) = (sess_info, perf.as_object_mut()) {
+                if let Some(fields) = info.as_object() {
+                    obj.extend(fields.clone().into_iter());
+                }
+            }
             Ok(Resp::Json(if chat {
                 serde_json::json!({
                     "id": "chatcmpl-llmpager", "object": "chat.completion", "model": model,
@@ -667,6 +1013,30 @@ fn handle(
                     "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
                     "usage": usage, "llmpager": perf})
             }))
+        }
+        ("GET", "/v1/sessions") => {
+            let r = registry.lock().unwrap();
+            let mut data = Vec::new();
+            for (name, e) in &r.warm {
+                for (id, s) in &e.sessions.map {
+                    data.push(serde_json::json!({"id": id, "model": name,
+                        "tokens": s.tokens.len(), "resident": s.slot.is_some(),
+                        "slot": s.slot, "turns": s.turns,
+                        "parked_bytes": s.parked.as_ref().map(|b| b.len()).unwrap_or(0)}));
+                }
+            }
+            Ok(Resp::Json(serde_json::json!({"object": "list", "data": data})))
+        }
+        ("DELETE", u) if u.starts_with("/v1/sessions/") => {
+            let id = u.trim_start_matches("/v1/sessions/");
+            let mut r = registry.lock().unwrap();
+            let mut dropped = 0usize;
+            for (_, e) in r.warm.iter_mut() {
+                if e.sessions.forget(id) {
+                    dropped += 1;
+                }
+            }
+            Ok(Resp::Json(serde_json::json!({"id": id, "deleted": dropped > 0})))
         }
         _ => bail!("no such endpoint: {method} {url}"),
     }

@@ -142,6 +142,82 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Session self-test: a context restored from an exported KV blob must
+    // generate *exactly* what an uninterrupted prefill does. Exercises
+    // kv_export/kv_import and the prefix-reuse path serving relies on.
+    if args.iter().any(|a| a == "--session-selftest") {
+        let n = prompt_ids.len();
+        if n < 4 {
+            bail!("--session-selftest needs a prompt of at least 4 tokens");
+        }
+        if dec.batch_cap() < 2 {
+            bail!("--session-selftest needs --batch=2 or more (slot 1 holds the session)");
+        }
+        let split = n / 2;
+
+        /// Prefill `ids[from..]` on `slot`, then greedily decode.
+        fn run(
+            dec: &mut AnyDecoder,
+            slot: usize,
+            ids: &[u32],
+            from: usize,
+            max_tokens: usize,
+            max_seq: usize,
+        ) -> Result<Vec<u32>> {
+            let cap = dec.chunk_cap();
+            let mut next = 0u32;
+            let mut pos = from;
+            for chunk in ids[from..].chunks(cap) {
+                let entries: Vec<(u32, usize, usize)> =
+                    chunk.iter().enumerate().map(|(i, t)| (*t, pos + i, slot)).collect();
+                let last = pos + chunk.len() == ids.len();
+                let out = dec.step_multi(&entries, last)?;
+                if last {
+                    next = *out.last().context("prefill produced no token")?;
+                }
+                pos += chunk.len();
+            }
+            let mut got = Vec::new();
+            for i in 0..max_tokens {
+                if dec.eos().contains(&next) {
+                    break;
+                }
+                got.push(next);
+                let p = ids.len() + i;
+                if p + 1 >= max_seq {
+                    break;
+                }
+                next = dec.step_multi(&[(next, p, slot)], true)?[0];
+            }
+            Ok(got)
+        }
+
+        // Baseline: one uninterrupted context on the anonymous slot.
+        let fresh = run(&mut dec, 0, &prompt_ids, 0, max_tokens, max_seq)?;
+
+        // Build the same prefix on slot 1, park it, deliberately clobber the
+        // slot with unrelated tokens, then restore and continue.
+        run(&mut dec, 1, &prompt_ids[..split], 0, 0, max_seq)?;
+        let blob = dec.kv_export(1, split)?;
+        run(&mut dec, 1, &prompt_ids[split..], 0, 0, max_seq)?;
+        dec.kv_import(1, split, &blob)?;
+        let restored = run(&mut dec, 1, &prompt_ids, split, max_tokens, max_seq)?;
+
+        if fresh != restored {
+            bail!(
+                "session-selftest FAIL: restored context diverged\n  fresh:    {fresh:?}\n                   restored: {restored:?}"
+            );
+        }
+        eprintln!(
+            "session-selftest PASS: {} tokens identical after export/clobber/import of a \
+             {split}-token context ({:.1} MB, {} bytes/token)",
+            fresh.len(),
+            blob.len() as f64 / 1e6,
+            dec.kv_bytes_per_token(),
+        );
+        return Ok(());
+    }
+
     // Serial self-test: N complete generations (prefill + decode) back to
     // back on one decoder — the shape a server sees, which a single CLI run
     // never exercises. Regression guard for the deferred-release ring

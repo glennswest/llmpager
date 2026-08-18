@@ -606,6 +606,68 @@ impl Decoder {
         Ok(())
     }
 
+    /// Bytes of KV state one token occupies across all layers — the host
+    /// cost of parking a session's context.
+    pub fn kv_bytes_per_token(&self) -> usize {
+        let elem = if self.kv_f16 { 2 } else { 4 };
+        2 * self.cfg.layers * self.cfg.kv_heads * self.cfg.head_dim * elem
+    }
+
+    fn kv_geometry(&self, seq: usize, len: usize) -> Result<(usize, u64, u64)> {
+        if seq >= self.batch_cap {
+            bail!("sequence slot {seq} exceeds batch cap {}", self.batch_cap);
+        }
+        if len > self.max_seq {
+            bail!("kv length {len} exceeds max_seq {}", self.max_seq);
+        }
+        let elem = if self.kv_f16 { 2 } else { 4 };
+        let run = len * self.cfg.head_dim * elem;
+        let head_stride = (self.max_seq * self.cfg.head_dim * elem) as u64;
+        let slot_off = seq as u64 * self.cfg.kv_heads as u64 * head_stride;
+        Ok((run, head_stride, slot_off))
+    }
+
+    /// Copy sequence slot `seq`'s KV for positions [0, len) to host memory.
+    /// A slot is [kv_heads, max_seq, head_dim] per layer, so a prefix is
+    /// `kv_heads` separate runs rather than one contiguous block.
+    pub fn kv_export(&self, seq: usize, len: usize) -> Result<Vec<u8>> {
+        let (run, head_stride, slot_off) = self.kv_geometry(seq, len)?;
+        let mut out = vec![0u8; self.kv_bytes_per_token() * len];
+        let mut at = 0usize;
+        for l in 0..self.cfg.layers {
+            for base in [self.kcache[l], self.vcache[l]] {
+                for h in 0..self.cfg.kv_heads {
+                    let src = base + slot_off + h as u64 * head_stride;
+                    self.cuda.dtoh_async(&mut out[at..at + run], src, self.stream)?;
+                    at += run;
+                }
+            }
+        }
+        self.cuda.sync_stream(self.stream)?;
+        Ok(out)
+    }
+
+    /// Inverse of `kv_export`: restore a parked context into slot `seq`.
+    pub fn kv_import(&mut self, seq: usize, len: usize, blob: &[u8]) -> Result<()> {
+        let (run, head_stride, slot_off) = self.kv_geometry(seq, len)?;
+        let want = self.kv_bytes_per_token() * len;
+        if blob.len() != want {
+            bail!("kv blob is {} bytes, expected {want} for {len} tokens", blob.len());
+        }
+        let mut at = 0usize;
+        for l in 0..self.cfg.layers {
+            for base in [self.kcache[l], self.vcache[l]] {
+                for h in 0..self.cfg.kv_heads {
+                    let dst = base + slot_off + h as u64 * head_stride;
+                    self.cuda.htod_async(dst, &blob[at..at + run], self.stream)?;
+                    at += run;
+                }
+            }
+        }
+        self.cuda.sync_stream(self.stream)?;
+        Ok(())
+    }
+
     /// Release every handle still queued in the deferred ring, waiting on
     /// each recorded event first. Restores the "this decoder pins nothing"
     /// invariant that `step_multi`'s wave fetching depends on.

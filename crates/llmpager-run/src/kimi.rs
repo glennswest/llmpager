@@ -1027,6 +1027,57 @@ impl KimiDecoder {
         f32_from_le(&self.logits_host)
     }
 
+    /// Bytes of MLA cache one token occupies across all layers.
+    pub fn kv_bytes_per_token(&self) -> usize {
+        self.cfg.layers * (self.cfg.kv_lora + self.cfg.rope) * 4
+    }
+
+    fn kv_geometry(&self, seq: usize, len: usize) -> Result<(usize, u64)> {
+        if seq >= self.batch_cap {
+            bail!("sequence slot {seq} exceeds batch cap {}", self.batch_cap);
+        }
+        if len > self.max_seq {
+            bail!("kv length {len} exceeds max_seq {}", self.max_seq);
+        }
+        let qk = self.cfg.kv_lora + self.cfg.rope;
+        Ok((len * qk * 4, (seq * self.max_seq * qk * 4) as u64))
+    }
+
+    /// Copy slot `seq`'s MLA cache for positions [0, len) to host memory.
+    /// The compressed cache is [max_seq, kv_lora + rope] per layer, so a
+    /// prefix is one contiguous run per layer.
+    pub fn kv_export(&self, seq: usize, len: usize) -> Result<Vec<u8>> {
+        let (run, slot_off) = self.kv_geometry(seq, len)?;
+        let mut out = vec![0u8; self.cfg.layers * run];
+        for l in 0..self.cfg.layers {
+            self.cuda.dtoh_async(
+                &mut out[l * run..(l + 1) * run],
+                self.cache[l] + slot_off,
+                self.stream,
+            )?;
+        }
+        self.cuda.sync_stream(self.stream)?;
+        Ok(out)
+    }
+
+    /// Inverse of `kv_export`.
+    pub fn kv_import(&mut self, seq: usize, len: usize, blob: &[u8]) -> Result<()> {
+        let (run, slot_off) = self.kv_geometry(seq, len)?;
+        let want = self.cfg.layers * run;
+        if blob.len() != want {
+            bail!("kv blob is {} bytes, expected {want} for {len} tokens", blob.len());
+        }
+        for l in 0..self.cfg.layers {
+            self.cuda.htod_async(
+                self.cache[l] + slot_off,
+                &blob[l * run..(l + 1) * run],
+                self.stream,
+            )?;
+        }
+        self.cuda.sync_stream(self.stream)?;
+        Ok(())
+    }
+
     #[allow(dead_code)] // eager-release everywhere now; kept for symmetry
     fn defer_release(&mut self, handles: Vec<ExpertHandle>) -> Result<()> {
         while let Some((ev_idx, _)) = self.pending_release.front() {
