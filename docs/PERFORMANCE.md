@@ -203,6 +203,54 @@ three ALU ops. Kernel: 122 → 137.7 GB/s; decode: 37.6 → **41.0 tok/s**.
 Re-testing core-q4 with the faster kernel: still loses (35.2 vs 41.0) —
 the rejection survives its own fix. Total arc: 19.9 → 41.0 (+106%).
 
+### 15. Global VRAM slot pool (M8 item 2) — +3.6pp hit, and a sharp cliff
+
+One shared slot pool for every layer instead of a private array each.
+Blob size is uniform, so any slot fits any expert and layers with diffuse
+routing can claim more of them. `LLMPAGER_GLOBAL_POOL=1`; opt-in.
+
+Measured on qwen3-30b-a3b, 100-token prompt, 60 tokens generated. Hit
+rate and bytes streamed are exactly reproducible run to run; wall-clock
+decode is not (the same per-layer baseline measured 9.53-12.36 tok/s
+across runs), so the deterministic metrics drive the conclusion and
+timings are reported as paired repeats.
+
+| slots | pools | hit | streamed |
+|-------|-------|-----|----------|
+| 24 | per-layer | 51.3% | 39.70 GB |
+| 24 | global | **54.9%** | **36.72 GB** |
+| 8 | per-layer | 27.4% | 59.14 GB |
+| 8 | global | **28.7%** | **58.08 GB** |
+
+Three paired decode runs at slots=24: per-layer 11.47 / 9.97 / 9.53
+tok/s, global 12.75 / 12.16 / 10.35 — global wins every pair, ~+14% on
+the mean. Teacher-forced perplexity (a steadier workload) agrees: 9.47
+-> 10.70 tok/s, with PPL identical at 18.7649, so the pool is lossless.
+
+**The decay interval is the whole game, and it has a cliff.** Decay
+halves every counter in a partition every N insertions. A shared pool
+takes every layer's insertions (~layers x top_k x miss_rate per token),
+so holding the per-layer *token* cadence means multiplying N by the
+layer count — and that measured worse (45.2% at x48). What works is
+letting recency count for more: x8, decaying every ~4 tokens instead of
+~24. Below that the counters are crushed before they accumulate, LFU
+degenerates into thrash, and the cache collapses:
+
+| decay | hit @ slots=24 | hit @ slots=8 |
+|-------|----------------|---------------|
+| x2 | 18.3% | 4.7% |
+| x4 | 53.4% | 2.1% |
+| **x8** | **54.9%** | **28.7%** |
+| x16 | 52.0% | 29.2% |
+| x48 | 45.2% | — |
+
+x8 is the only setting that beat per-layer pools at both sizes, so it is
+the default (`LLMPAGER_POOL_DECAY_MULT` overrides). That sensitivity is
+why the pool stays opt-in: the win is real but modest, and the failure
+mode of a mistuned constant is a 2% hit rate rather than a small
+regression. Worth revisiting if the decay cadence can be derived from
+the observed miss rate instead of guessed.
+
 ### Fixed along the way
 
 - **VRAM allocation granularity**: 3,072 individual ~2.5MB slot buffers

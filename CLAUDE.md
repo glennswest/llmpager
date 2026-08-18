@@ -10,7 +10,7 @@ the Linux + CUDA equivalent.
 
 ## Version
 
-Current: **0.19.0** (pre-1.0, API unstable)
+Current: **0.20.0** (pre-1.0, API unstable)
 
 Version locations (must all match):
 - `Cargo.toml` — `[workspace.package] version` (all crates inherit it)
@@ -211,10 +211,16 @@ near-sequential ~9.6GB sweep), uniform blob size (no slot fragmentation).
       write-allocate on disk reads; --ram-gb / serve ram_gb (kimi 80GB
       = ~3,200 experts). First 120-token run: 0.35 -> 0.57 tok/s (+63%)
       with the tier still cold; converges higher on long runs.
-- [ ] 2. Global VRAM slot pool: replace per-layer slot arrays with one
-      aged-LFU pool keyed (layer, expert) — uniform blob size means any
-      slot fits any expert; layers with high routing entropy naturally
-      claim more slots. Same VRAM, higher hit rate. ExpertCache refactor.
+- [x] 2. Global VRAM slot pool (v0.20.0, opt-in `LLMPAGER_GLOBAL_POOL=1`):
+      the premise holds but is worth less than it looked. qwen3-30b at
+      slots=24: hit 51.3 -> 54.9%, streamed 39.70 -> 36.72 GB, decode
+      ~+14% over three paired runs, PPL identical. It stays opt-in because
+      the decay cadence has a cliff — a shared pool takes every layer's
+      insertions, and holding the per-layer *token* cadence (x layers) is
+      worse (45.2%), while decaying too fast collapses the cache to 2-18%.
+      x8 (every ~4 tokens) is the only setting that beat per-layer pools at
+      both sizes tried. Deriving the cadence from the observed miss rate
+      would make it safe to default on. Full table in docs/PERFORMANCE.md.
 - [ ] 3. f16 for Kimi attention state: MLA cache rows f32 -> f16
       (2.3KB -> 1.15KB/token; 256K ctx: 590 -> 295MB/seq) and absorbed
       kv_b (kt/vw) bf16 -> f16/fp8 (~0.5GB VRAM back to expert slots).
@@ -319,6 +325,25 @@ Blocking slidemaker: IndexTTS-2 could not start alongside llmpager.
       those would mean dropping live session contexts.
 
 ## Session Log
+
+- 2026-08-18 (later): **Flat expert ids and an optional global slot pool
+  (v0.20.0), closes #1.** `ExpertCache` now keys on a flat `u32` and draws
+  slots from partitions; one partition per layer is the old behaviour, one
+  partition is the global pool M8 wanted, and a flat expert population (what
+  neuro-tcore asked for in #1) is one partition with no folding.
+  - The global pool helps, but less than the work plan assumed, and only at
+    the right decay cadence: +3.6pp hit, -7.5% bytes, ~+14% decode at
+    slots=24. PPL identical, so it is lossless.
+  - **Two measurement lessons worth keeping.** First, my initial A/B said the
+    pool was clearly *worse* — it was running the x48 decay default I had
+    just guessed at; the parameter, not the idea, was wrong. Second,
+    wall-clock decode on this box varies ~20% run to run (the same baseline
+    gave 9.53-12.36 tok/s), so single-run timings decide nothing. Hit rate
+    and bytes streamed are exactly reproducible and should drive tuning,
+    with paired repeats for timing.
+  - Kept opt-in: the failure mode of a mistuned decay constant is a 2% hit
+    rate, not a small regression. Deriving it from the observed miss rate is
+    the fix that would make it safe to default on.
 
 - 2026-08-18: **VRAM co-tenancy shipped (v0.19.0), closes #6.** The expert
   arena is now sized against *free* VRAM, not just against llmpager's own

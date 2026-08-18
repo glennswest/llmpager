@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [v0.20.0] — 2026-08-18
+
+Flat expert ids, and an optional global slot pool.
+
+### Added
+- `ExpertCache` is keyed by a flat `u32` expert id and draws slots from
+  partitions; `(layer, expert)` folds as `layer * experts_per_layer +
+  expert` (#1). One partition per layer is the previous behaviour exactly;
+  a flat expert population is one partition with no folding
+- `LLMPAGER_GLOBAL_POOL=1`: every layer shares one slot pool. Measured on
+  qwen3-30b-a3b at slots=24: hit 51.3% -> 54.9%, streamed 39.70 -> 36.72
+  GB, decode ~+14% over three paired runs. PPL identical (18.7649), so it
+  is lossless. Opt-in — the decay cadence it needs has a sharp cliff
+  (2-18% hit if mistuned), documented in docs/PERFORMANCE.md
+- `LLMPAGER_POOL_DECAY_MULT` (default 8) to re-tune that cadence
+
+### Changed
+- Slots are global indices, so `publish`/`is_ready`/`release` take a slot
+  alone and the pager's `idx(layer, slot)` collapses to the slot itself
+- The stall guard asks `ExpertCache::is_wedged` instead of scanning a
+  layer's fill range, which stops being meaningful once slots are global
+
 ## [v0.19.0] — 2026-08-18
 
 Sharing the GPU: llmpager can now give VRAM back (#6).
