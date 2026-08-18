@@ -58,6 +58,34 @@ v0.17.0 by flushing the ring at `step_multi` entry). `Pager::request` now
 treats "fully pinned with nothing in flight" as an error rather than
 waiting forever, so any future violation reports itself instead of hanging.
 
+### Sessions (M10) — `llmpager-serve::SessionStore`
+
+The decoder allocates `batch_cap` independent KV regions per layer and
+`step_multi` takes a sequence slot per entry, so isolated contexts were
+already possible; sessions add identity, persistence, and reuse on top.
+
+- A session is a name, the tokens whose KV it holds, and where that KV
+  lives. Position i of the cache holds state for `tokens[..=i]`, so any
+  prompt sharing a prefix with `tokens` can skip prefilling that prefix.
+- Slot 0 stays the anonymous lane: sessionless requests decode there as
+  they always have, and cannot clobber a session's state.
+- Two eviction tiers, matching the expert path: LRU over VRAM sequence
+  slots, then LRU over a host-RAM budget. Parking is `kv_export` (D2H)
+  and restoring is `kv_import` (H2D) — ~96KB/token for qwen3-30b, so a
+  1000-token context is ~98MB and moves in milliseconds, against seconds
+  of expert paging to prefill it again.
+- Reuse is capped at `prompt.len() - 1`: the forward pass over at least
+  one token is what produces the logits the reply is sampled from.
+- Dropping a parked context also clears its token list, so the store can
+  never claim reuse it cannot honour.
+
+Prefill is not bit-reproducible across chunk groupings — a layer fetches
+its chunk's expert *union* in waves, so regrouping the tokens regroups
+the partial sums. Measured on a 130-token prompt: changing the chunk size
+alone moves the next-token logits by 0.093 (scale 22.2), while prefix
+reuse moves them 0.039. The KV copy itself is exact — same boundaries,
+same bits — which is what `--session-selftest` asserts.
+
 ### Pager (M1) — CUDA side
 
 - One device buffer per (layer, slot): the cache's backing store.

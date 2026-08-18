@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [v0.18.0] — 2026-08-17
+
+Multi-user serving: one warm model, many named contexts.
+
+### Added
+- Sessions: `session` on `/v1/completions` and `/v1/chat/completions`
+  keeps a named KV context, so a request prefills only the part of its
+  prompt the context does not already cover. `GET /v1/sessions`,
+  `DELETE /v1/sessions/{id}`; responses report reused vs prefilled tokens
+- `kv_export` / `kv_import` on both engines — Qwen slots are
+  [kv_heads, max_seq, head_dim] (strided prefix), Kimi's MLA cache is
+  [max_seq, kv_lora+rope] (contiguous). 96KB/token for qwen3-30b
+- `SessionStore`: LRU over the decoder's sequence slots, then LRU over a
+  host-RAM budget (`session_ram_gb`, default 8GB). Slot 0 stays the
+  anonymous lane so sessionless traffic cannot clobber a session
+- `--session-selftest`: measures the engine's chunk-grouping spread, then
+  requires prefix reuse to stay inside it and the KV copy to be exact
+
+### Measured on ai.g8.lo (qwen3-30b-a3b)
+- Chat continuation: turn 2 reused 34 of 53 prompt tokens
+- Shared-prefix fan-out (the slidemaker shape — one system prompt, many
+  items): 212 tokens/4.28s cold, then 195 reused / 11 prefilled at 0.42s
+- Eviction round-trip: a parked context restored from host RAM reused 19
+  of 21 tokens
+- KV export/import bit-exact (logit delta 0.00000); prefix reuse moves
+  logits 0.039 against the 0.093 the engine already spans across chunk
+  groupings, argmax unchanged
+
+### Known
+- Requests are still served one at a time; sessions make each turn cheap
+  but do not yet decode concurrently. Continuous batching over session
+  slots is the next step (M10 item 6)
+- Sessions belong to a warm model and are dropped when it is evicted
+
 ## [v0.17.0] — 2026-08-17
 
 The serving deadlock: one request per warm model, then silence.
