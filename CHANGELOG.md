@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [v0.19.0] — 2026-08-18
+
+Sharing the GPU: llmpager can now give VRAM back (#6).
+
+### Added
+- `reserve_mb` (per model or global in `serve.json`, `--reserve-mb` on the
+  CLI): `Pager::new` calls `cuMemGetInfo` and clamps `slots_per_layer` to
+  whatever leaves that much VRAM free, at warm-up and on every resize
+- `POST /v1/admin/slots` with `target` and/or `reserve_mb` resizes every
+  warm model live, reusing the budgeter's resize path, so a co-tenant can
+  ask for room before a render and give it back after
+- `GET /v1/admin/vram`: free/total VRAM and each warm model's slots
+
+### Fixed
+- A failed `resize_cache` left the decoder with no pager — it frees the
+  old arena before building the new one — so the next token panicked.
+  Both engines now rebuild at the previous size (ignoring the reserve,
+  which is usually what failed) and report the original error; serving
+  rolls the reserve back so a bad value is not left armed
+- `cur_slots` now reports what was actually allocated rather than what was
+  requested, which a reserve can clamp
+- Removed dead locals in `Decoder::step` and a redundant `std::io::Read`
+  import; the workspace compiles warning-free
+
+### Measured on ai.g8.lo
+- At 48 slots a co-tenant (IndexTTS-2's torch) asking for 7GB gets CUDA
+  OOM with 5.43 GiB free — the reported failure
+- After `{"reserve_mb": 9000}`: 48 -> 23 slots, 8990 MB free, the same
+  allocation succeeds, llmpager still serving
+- `--reserve-mb=4000` at warm-up clamps 48 -> 14 slots and runs
+- An impossible reserve (15000 MB) is refused with the numbers and the
+  model keeps serving at its current size
+
 ## [v0.18.0] — 2026-08-17
 
 Multi-user serving: one warm model, many named contexts.

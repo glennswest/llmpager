@@ -91,6 +91,46 @@ it. Sessions belong to a warm model and are dropped when it is evicted.
 
 Manage them with `GET /v1/sessions` and `DELETE /v1/sessions/{id}`.
 
+## Sharing the GPU
+
+The expert cache is a cache, so it is the right thing to give up when
+another process needs the card. CUDA offers no cross-process pressure
+signal — a neighbour's allocation simply fails against memory llmpager is
+holding — so there are two ways to make room.
+
+**Statically**, leave a reserve free at warm-up. The cache is sized down
+to fit around it:
+
+```json
+{ "name": "qwen3-30b-a3b", "slots": 48, "reserve_mb": 6000 }
+```
+
+`reserve_mb` may also sit at the top level of `serve.json` as a default
+for every model, and `llmpager-run` takes `--reserve-mb`.
+
+**Dynamically**, have the neighbour ask for room before it needs it and
+give it back after:
+
+```bash
+curl -X POST http://ai.g8.lo:8090/v1/admin/slots -d '{"reserve_mb": 9000}'
+# ... run the other workload ...
+curl -X POST http://ai.g8.lo:8090/v1/admin/slots -d '{"reserve_mb": 0, "target": 48}'
+```
+
+`POST /v1/admin/slots` takes `target` (slots per layer), `reserve_mb`, or
+both, and resizes every warm model live — llmpager keeps serving the whole
+time, just with a lower hit rate. `GET /v1/admin/vram` reports free and
+total VRAM plus each warm model's current slots.
+
+Measured on the 16GB card: at 48 slots a co-tenant asking for 7GB gets
+`CUDA out of memory`; after `{"reserve_mb": 9000}` llmpager drops to 23
+slots, the same allocation succeeds, and llmpager still answers requests.
+An unsatisfiable reserve is refused with the numbers that made it
+impossible, and the model keeps the size it had.
+
+Note the resident core and the KV sequence slots are not part of this —
+only the expert cache resizes.
+
 ## Requirements
 
 - Linux, NVIDIA GPU (tested: RTX 5060 Ti 16GB, driver 610.x, CUDA 13)

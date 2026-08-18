@@ -10,7 +10,7 @@ the Linux + CUDA equivalent.
 
 ## Version
 
-Current: **0.18.0** (pre-1.0, API unstable)
+Current: **0.19.0** (pre-1.0, API unstable)
 
 Version locations (must all match):
 - `Cargo.toml` — `[workspace.package] version` (all crates inherit it)
@@ -303,7 +303,41 @@ per-slot KV regions); what is missing is identity, persistence, and reuse.
       H2D-bound models. Needs a scheduler thread owning the decoder; the
       session slot machinery above is its prerequisite.
 
+### M11 — VRAM co-tenancy — shipped 2026-08-18 (v0.19.0), closes #6
+Blocking slidemaker: IndexTTS-2 could not start alongside llmpager.
+- [x] `cuMemGetInfo` in the driver; `reserve_bytes` in `PagerConfig`
+- [x] `Pager::new` clamps slots to leave the reserve free (warm-up + resize)
+- [x] `reserve_mb` in serve.json (per model or global), `--reserve-mb` CLI
+- [x] `POST /v1/admin/slots` {target|reserve_mb}, `GET /v1/admin/vram`
+- [x] resize_cache made failure-safe (it frees the arena before rebuilding,
+      so a failed rebuild used to leave pager: None and panic the server)
+- [ ] Automatic yielding on observed pressure — deliberately not done:
+      CUDA gives no signal about *who* needs memory, so polling free VRAM
+      would shrink the cache for any transient allocation. Explicit asks
+      are the honest interface until something better exists.
+- [ ] KV sequence slots do not resize; only the expert cache does. Yielding
+      those would mean dropping live session contexts.
+
 ## Session Log
+
+- 2026-08-18: **VRAM co-tenancy shipped (v0.19.0), closes #6.** The expert
+  arena is now sized against *free* VRAM, not just against llmpager's own
+  warm set, so another process on the card is no longer starved by cache we
+  can give up. Verified with the actual neighbour: at 48 slots IndexTTS-2's
+  torch OOMs asking for 7GB (5.43 GiB free); after a `{"reserve_mb": 9000}`
+  admin call llmpager drops to 23 slots, 8990 MB free, the allocation
+  succeeds, and llmpager keeps answering.
+  - Two hazards found by testing the failure path rather than the happy one.
+    `resize_cache` frees the old arena *before* building the new one, so any
+    failure after that point left `pager: None` and panicked the next token
+    — testing `reserve_mb=15000` on a 16GB card killed the server outright.
+    The fallback rebuild also has to ignore the reserve, since an
+    unsatisfiable reserve is precisely what lands there; the first version
+    of the fix inherited it and failed twice.
+  - Deliberately not automatic: CUDA exposes no cross-process pressure
+    signal, so polling free VRAM would shrink the cache for any transient
+    allocation by anyone. An explicit ask from the neighbour is honest and
+    matches how slidemaker actually runs (LLM pass, then TTS pass).
 
 - 2026-08-17 (later): **Multi-session serving shipped (v0.18.0).** One warm
   model now holds many named KV contexts; a request naming a session decodes

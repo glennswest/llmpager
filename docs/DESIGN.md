@@ -58,6 +58,29 @@ v0.17.0 by flushing the ring at `step_multi` entry). `Pager::request` now
 treats "fully pinned with nothing in flight" as an error rather than
 waiting forever, so any future violation reports itself instead of hanging.
 
+### VRAM co-tenancy (M11) — `reserve_bytes`
+
+`Pager::new` is the only place that sizes the expert arena, so it is the
+only place that needs to know about the rest of the card. Given a
+reserve it calls `cuMemGetInfo` and clamps `slots_per_layer` to whatever
+still leaves that much free, erroring only if not even one slot per layer
+fits. The clamp applies identically at warm-up and on every resize, and
+`resize_cache` frees the old arena *before* building the new one, so the
+free-memory reading is against genuinely free memory rather than memory
+we are about to release.
+
+Because the arena is dropped first, a failure to build the replacement
+would leave the decoder with no pager at all. Both engines therefore
+rebuild at the previous size — with the reserve ignored, since an
+unsatisfiable reserve is exactly what tends to fail — and report the
+original error. The serving layer additionally rolls the reserve back so
+a bad value is not left armed for the next rebalance.
+
+What does *not* resize: the resident core, and the KV sequence slots
+(`batch_cap × max_seq`). Yielding those would mean dropping session
+contexts, so the expert cache — which is reconstructible from the pack by
+definition — absorbs the whole adjustment.
+
 ### Sessions (M10) — `llmpager-serve::SessionStore`
 
 The decoder allocates `batch_cap` independent KV regions per layer and
