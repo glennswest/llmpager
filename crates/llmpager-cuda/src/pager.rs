@@ -326,7 +326,12 @@ impl Pager {
                     1,
                     meta.experts_per_layer as u32,
                     total_slots as u32,
-                    cfg.decay_interval.saturating_mul(layers as u32).max(1),
+                    std::env::var("LLMPAGER_POOL_DECAY_MULT")
+                        .ok()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(layers as u32)
+                        .saturating_mul(cfg.decay_interval)
+                        .max(1),
                 )
             } else {
                 ExpertCache::partitioned(
