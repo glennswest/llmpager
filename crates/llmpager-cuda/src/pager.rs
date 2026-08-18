@@ -326,10 +326,20 @@ impl Pager {
                     1,
                     meta.experts_per_layer as u32,
                     total_slots as u32,
+                    // Decay cadence, in insertions. A shared pool takes every
+                    // layer's insertions (~layers x top_k x miss_rate per
+                    // token), so holding the per-layer *token* cadence would
+                    // mean multiplying by the layer count -- measured worse.
+                    // A shared pool wants recency to count for more, and x8
+                    // (decay every ~4 tokens rather than ~24) was the only
+                    // setting that beat per-layer pools at both cache sizes
+                    // tried. Below ~x4 the counters are crushed before they
+                    // accumulate and LFU degenerates into thrash: 18% hit at
+                    // x2, 2% at x4 on a small cache. Override to re-tune.
                     std::env::var("LLMPAGER_POOL_DECAY_MULT")
                         .ok()
                         .and_then(|v| v.parse::<u32>().ok())
-                        .unwrap_or(layers as u32)
+                        .unwrap_or(8)
                         .saturating_mul(cfg.decay_interval)
                         .max(1),
                 )
