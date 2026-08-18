@@ -43,6 +43,11 @@ pub struct PagerConfig {
     /// larger than RAM: frequency-aware admission/eviction at expert
     /// granularity; a hit costs a host memcpy instead of a disk read.
     pub ram_bytes: u64,
+    /// VRAM to leave free for other processes on the card, in bytes (0
+    /// disables). The expert arena is a *cache*, so it is the right thing
+    /// to give up when a co-tenant needs room: `slots_per_layer` is clamped
+    /// to whatever still leaves this much free.
+    pub reserve_bytes: u64,
 }
 
 impl Default for PagerConfig {
@@ -53,6 +58,7 @@ impl Default for PagerConfig {
             decay_interval: 256,
             direct: true,
             ram_bytes: 0,
+            reserve_bytes: 0,
         }
     }
 }
@@ -244,6 +250,38 @@ impl Pager {
         let meta = index.meta().clone();
         let span = (index.max_blob_bytes().div_ceil(ALIGN) * ALIGN) as usize;
         let layers = meta.num_layers;
+
+        // Clamp the arena to what the card can spare. CUDA gives no
+        // cross-process pressure signal, so a co-tenant's allocation simply
+        // fails against memory we are holding as cache; leaving a reserve is
+        // the only way to be a good neighbour by default.
+        let mut cfg = cfg;
+        if cfg.reserve_bytes > 0 {
+            let (free, total) = cuda.mem_info()?;
+            let per_slot = layers as u64 * span as u64;
+            let spare = free.saturating_sub(cfg.reserve_bytes);
+            let fits = (spare / per_slot.max(1)) as u32;
+            if fits < cfg.slots_per_layer {
+                if fits == 0 {
+                    bail!(
+                        "cannot honour a {} MB VRAM reserve: {} MB free of {} MB, and one slot \
+                         per layer needs {} MB",
+                        cfg.reserve_bytes / 1_000_000,
+                        free / 1_000_000,
+                        total / 1_000_000,
+                        per_slot / 1_000_000
+                    );
+                }
+                eprintln!(
+                    "vram reserve: {} slots/layer -> {fits} (leaving {} MB free of {} MB)",
+                    cfg.slots_per_layer,
+                    cfg.reserve_bytes / 1_000_000,
+                    total / 1_000_000
+                );
+                cfg.slots_per_layer = fits;
+            }
+        }
+        let cfg = cfg;
         let total_slots = layers as usize * cfg.slots_per_layer as usize;
 
         // One arena per layer, sliced into slots: thousands of individual

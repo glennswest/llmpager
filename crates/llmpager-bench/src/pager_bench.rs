@@ -44,6 +44,7 @@ pub fn run(f: &Flags) -> Result<()> {
             decay_interval: 64.max(slots * 4),
             direct: true,
             ram_bytes: 0,
+            reserve_bytes: 0,
         },
     )?;
 

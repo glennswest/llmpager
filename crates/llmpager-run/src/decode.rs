@@ -49,6 +49,8 @@ pub struct Decoder {
     io_threads: usize,
     direct: bool,
     ram_bytes: u64,
+    /// VRAM left free for other processes on the card (bytes).
+    reserve_bytes: u64,
     max_seq: usize,
     /// Speculative prefetch: warm layer L+1 with layer L's expert ids.
     pub prefetch_next: bool,
@@ -109,6 +111,7 @@ impl Decoder {
         core_q4: bool,
         direct: bool,
         ram_bytes: u64,
+        reserve_bytes: u64,
         batch_cap: usize,
     ) -> Result<Self> {
         let batch_cap = batch_cap.max(1);
@@ -137,6 +140,7 @@ impl Decoder {
                 decay_interval: 64.max(slots * 4),
                 direct,
                 ram_bytes,
+                reserve_bytes,
             },
         )?;
 
@@ -203,6 +207,7 @@ impl Decoder {
             io_threads,
             direct,
             ram_bytes,
+            reserve_bytes,
             max_seq,
             prefetch_next: true,
         })
@@ -225,6 +230,7 @@ impl Decoder {
                 decay_interval: 64.max(slots * 4),
                 direct: self.direct,
                 ram_bytes: self.ram_bytes,
+                reserve_bytes: self.reserve_bytes,
             },
         )?);
         Ok(())
@@ -548,6 +554,22 @@ impl Decoder {
 
     pub fn chunk_cap(&self) -> usize {
         self.chunk_cap
+    }
+
+    /// Slots per layer actually allocated (a VRAM reserve may clamp it).
+    pub fn slots_per_layer(&self) -> u32 {
+        self.pager.as_ref().map(|p| p.slots_per_layer()).unwrap_or(0)
+    }
+
+    /// Free and total VRAM on the device, across every process.
+    pub fn mem_info(&self) -> Result<(u64, u64)> {
+        self.cuda.mem_info()
+    }
+
+    /// Change the VRAM reserve; takes effect on the next `resize_cache`,
+    /// which frees the current arena before the new one is sized.
+    pub fn set_reserve_bytes(&mut self, bytes: u64) {
+        self.reserve_bytes = bytes;
     }
 
     pub fn batch_cap(&self) -> usize {

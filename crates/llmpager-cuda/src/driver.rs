@@ -30,6 +30,7 @@ pub struct Cuda {
     lib: &'static Library,
     ctx: CUcontext,
     mem_alloc: unsafe extern "C" fn(*mut CUdeviceptr, usize) -> CUresult,
+    mem_get_info: unsafe extern "C" fn(*mut usize, *mut usize) -> CUresult,
     mem_free: unsafe extern "C" fn(CUdeviceptr) -> CUresult,
     mem_host_alloc: unsafe extern "C" fn(*mut *mut u8, usize, u32) -> CUresult,
     mem_host_free: unsafe extern "C" fn(*mut u8) -> CUresult,
@@ -85,6 +86,7 @@ impl Cuda {
             Ok(Self {
                 ctx,
                 mem_alloc: *lib.get(b"cuMemAlloc_v2")?,
+                mem_get_info: *lib.get(b"cuMemGetInfo_v2")?,
                 mem_free: *lib.get(b"cuMemFree_v2")?,
                 mem_host_alloc: *lib.get(b"cuMemHostAlloc")?,
                 mem_host_free: *lib.get(b"cuMemFreeHost")?,
@@ -107,6 +109,15 @@ impl Cuda {
                 lib,
             })
         }
+    }
+
+    /// Free and total device memory, in bytes. Device-wide, so it accounts
+    /// for every process on the card — the only cross-tenant signal CUDA
+    /// offers (there is no notification when a co-tenant needs room).
+    pub fn mem_info(&self) -> Result<(u64, u64)> {
+        let (mut free, mut total) = (0usize, 0usize);
+        unsafe { cu!(cuMemGetInfo, (self.mem_get_info)(&mut free, &mut total)) };
+        Ok((free as u64, total as u64))
     }
 
     /// Make the primary context current on the calling thread. Worker threads

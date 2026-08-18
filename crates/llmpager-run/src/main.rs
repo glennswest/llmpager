@@ -22,6 +22,9 @@ fn main() -> Result<()> {
     let slots: u32 = arg(&args, "slots").and_then(|v| v.parse().ok()).unwrap_or(32);
     let io_threads: usize = arg(&args, "io-threads").and_then(|v| v.parse().ok()).unwrap_or(4);
     let max_seq: usize = arg(&args, "max-seq").and_then(|v| v.parse().ok()).unwrap_or(4096);
+    // VRAM to leave free for other processes on the card. The expert cache
+    // is sized down to fit around it.
+    let reserve_mb: u64 = arg(&args, "reserve-mb").and_then(|v| v.parse().ok()).unwrap_or(0);
     // Core GEMV encoding. Default bf16: measured faster than q4 (the q4
     // kernel's unpack cost eats the bandwidth win) and greedy output drifts
     // under double quantization. --core-dtype=q4 kept for experiments.
@@ -72,6 +75,7 @@ fn main() -> Result<()> {
         core_q4,
         direct,
         (ram_gb * 1e9) as u64,
+        reserve_mb * 1_000_000,
         batch,
     )?;
     // Profiled pre-warm: load a fetch-count profile into the RAM tier

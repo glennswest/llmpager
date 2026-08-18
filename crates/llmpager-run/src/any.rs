@@ -26,16 +26,19 @@ impl AnyDecoder {
         core_q4: bool,
         direct: bool,
         ram_bytes: u64,
+        reserve_bytes: u64,
         batch: usize,
     ) -> Result<Self> {
         let meta = llmpager_core::pack::PackReader::open(pack)?.meta().clone();
         if kimi::KimiConfig::is_kimi(&meta.config) {
             Ok(AnyDecoder::Kimi(kimi::KimiDecoder::new(
-                pack, core, slots, io_threads, max_seq, direct, ram_bytes, batch,
+                pack, core, slots, io_threads, max_seq, direct, ram_bytes, reserve_bytes,
+                batch,
             )?))
         } else {
             Ok(AnyDecoder::Qwen(decode::Decoder::new(
-                pack, core, slots, io_threads, max_seq, core_q4, direct, ram_bytes, batch,
+                pack, core, slots, io_threads, max_seq, core_q4, direct, ram_bytes,
+                reserve_bytes, batch,
             )?))
         }
     }
@@ -99,6 +102,31 @@ impl AnyDecoder {
         match self {
             AnyDecoder::Qwen(d) => d.kv_import(seq, len, blob),
             AnyDecoder::Kimi(d) => d.kv_import(seq, len, blob),
+        }
+    }
+
+    /// Free and total VRAM on the device, across every process.
+    pub fn mem_info(&self) -> Result<(u64, u64)> {
+        match self {
+            AnyDecoder::Qwen(d) => d.mem_info(),
+            AnyDecoder::Kimi(d) => d.mem_info(),
+        }
+    }
+
+    /// Change the VRAM reserve; applied by the next `resize_cache`.
+    pub fn set_reserve_bytes(&mut self, bytes: u64) {
+        match self {
+            AnyDecoder::Qwen(d) => d.set_reserve_bytes(bytes),
+            AnyDecoder::Kimi(d) => d.set_reserve_bytes(bytes),
+        }
+    }
+
+    /// Expert-cache slots per layer actually in use — may be below what was
+    /// requested if a VRAM reserve clamped it.
+    pub fn slots_per_layer(&self) -> u32 {
+        match self {
+            AnyDecoder::Qwen(d) => d.slots_per_layer(),
+            AnyDecoder::Kimi(d) => d.slots_per_layer(),
         }
     }
 

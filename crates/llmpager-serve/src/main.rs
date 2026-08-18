@@ -51,6 +51,10 @@ struct ModelSpec {
     /// Host RAM for parked session contexts (GB). Sessions evicted from a
     /// VRAM sequence slot keep their KV here instead of re-prefilling.
     session_ram_gb: f64,
+    /// VRAM to leave free for other processes sharing the card (MB). The
+    /// expert cache is clamped to fit around it at warm-up and on every
+    /// rebalance, so a co-tenant is not starved by cache we can give up.
+    reserve_mb: u64,
 }
 
 struct Engine {
@@ -280,7 +284,8 @@ impl Registry {
             if engine.cur_slots != want {
                 eprintln!("budgeter: {name} cache {} -> {want} slots", engine.cur_slots);
                 engine.dec.resize_cache(want)?;
-                engine.cur_slots = want;
+                // A VRAM reserve may have clamped it below `want`.
+                engine.cur_slots = engine.dec.slots_per_layer();
             }
         }
         Ok(())
@@ -324,7 +329,8 @@ impl Registry {
                 .map_err(|e| anyhow::anyhow!("loading {}: {e}", tok_file.display()))?;
             let dec = AnyDecoder::new(
                 &spec.pack, &spec.core, slots, spec.io_threads, spec.max_seq,
-                spec.core_q4, spec.direct, (spec.ram_gb * 1e9) as u64, spec.batch,
+                spec.core_q4, spec.direct, (spec.ram_gb * 1e9) as u64,
+                spec.reserve_mb * 1_000_000, spec.batch,
             )?;
             let mut dec = dec;
             dec.set_min_expert_weight(spec.min_expert_weight as f32);
@@ -358,6 +364,8 @@ impl Registry {
                 load(&spec, self.spec(name)?.slots_solo)?
             }
         };
+        let mut engine = engine;
+        engine.cur_slots = engine.dec.slots_per_layer();
         eprintln!("loaded model {name} ({} slots) in {:.1}s", engine.cur_slots, t0.elapsed().as_secs_f64());
         self.warm.insert(0, (name.to_string(), engine));
         // If eviction/retry left us solo, grow back.
@@ -752,6 +760,10 @@ fn main() -> Result<()> {
                 min_expert_weight: m["min_expert_weight"].as_f64().unwrap_or(0.0),
                 prewarm: m["prewarm"].as_str().map(PathBuf::from),
                 session_ram_gb: m["session_ram_gb"].as_f64().unwrap_or(8.0),
+                reserve_mb: m["reserve_mb"]
+                    .as_u64()
+                    .or_else(|| cfg["reserve_mb"].as_u64())
+                    .unwrap_or(0),
             })
         })
         .collect::<Result<_>>()?;
@@ -1034,6 +1046,61 @@ fn handle(
                     "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
                     "usage": usage, "llmpager": perf})
             }))
+        }
+        // Co-tenancy control. CUDA has no cross-process pressure signal, so
+        // a neighbour that needs the card cannot ask for it implicitly —
+        // these let it ask explicitly, reusing the budgeter's resize path.
+        ("GET", "/v1/admin/vram") => {
+            let r = registry.lock().unwrap();
+            let mem = r.warm.first().map(|(_, e)| e.dec.mem_info());
+            let (free, total) = match mem {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => bail!("mem_info: {e:#}"),
+                None => (0, 0),
+            };
+            let models: Vec<_> = r
+                .warm
+                .iter()
+                .map(|(n, e)| serde_json::json!({"model": n, "slots": e.cur_slots}))
+                .collect();
+            Ok(Resp::Json(serde_json::json!({
+                "free_mb": free / 1_000_000, "total_mb": total / 1_000_000,
+                "warm": models})))
+        }
+        ("POST", "/v1/admin/slots") => {
+            let req: serde_json::Value = serde_json::from_str(body).context("bad JSON")?;
+            let target = req["target"].as_u64().map(|v| v as u32);
+            let reserve_mb = req["reserve_mb"].as_u64();
+            if target.is_none() && reserve_mb.is_none() {
+                bail!("expected a \"target\" slot count or a \"reserve_mb\" free-VRAM target");
+            }
+            let mut r = registry.lock().unwrap();
+            let names: Vec<String> = r.warm.iter().map(|(n, _)| n.clone()).collect();
+            let mut out = Vec::new();
+            for name in names {
+                // Resizing frees the old arena first, so the reserve is
+                // measured against genuinely free memory.
+                let want = match target {
+                    Some(t) => t,
+                    None => r.spec(&name)?.slots_solo,
+                };
+                let Some((_, engine)) = r.warm.iter_mut().find(|(n, _)| n == &name) else {
+                    continue;
+                };
+                if let Some(mb) = reserve_mb {
+                    engine.dec.set_reserve_bytes(mb * 1_000_000);
+                }
+                engine.dec.resize_cache(want)?;
+                engine.cur_slots = engine.dec.slots_per_layer();
+                out.push(serde_json::json!({"model": name, "slots": engine.cur_slots}));
+            }
+            let (free, total) = match r.warm.first().map(|(_, e)| e.dec.mem_info()) {
+                Some(Ok(v)) => v,
+                _ => (0, 0),
+            };
+            eprintln!("admin: resized to {out:?}, {} MB free", free / 1_000_000);
+            Ok(Resp::Json(serde_json::json!({
+                "warm": out, "free_mb": free / 1_000_000, "total_mb": total / 1_000_000})))
         }
         ("GET", "/v1/sessions") => {
             let r = registry.lock().unwrap();
