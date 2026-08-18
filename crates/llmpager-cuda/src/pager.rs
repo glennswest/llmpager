@@ -122,14 +122,14 @@ impl RamTier {
     /// Copy the expert into `dst` on hit.
     fn get(&self, layer: u16, expert: u16, dst: &mut [u8]) -> bool {
         let key = self.key(layer, expert);
-        let slot = match self.cache.lock().unwrap().lookup_ready(0, key) {
+        let slot = match self.cache.lock().unwrap().lookup_ready(key as u32) {
             Some(s) => s,
             None => return false,
         };
         unsafe {
             std::ptr::copy_nonoverlapping(self.slab(slot), dst.as_mut_ptr(), self.span);
         }
-        self.cache.lock().unwrap().release(0, slot);
+        self.cache.lock().unwrap().release(slot);
         self.hits.fetch_add(1, Ordering::Relaxed);
         true
     }
@@ -139,10 +139,10 @@ impl RamTier {
         let key = self.key(layer, expert);
         let slot = {
             let mut c = self.cache.lock().unwrap();
-            match c.acquire(0, key) {
+            match c.acquire(key as u32) {
                 Lookup::Miss { slot, .. } => slot,
                 Lookup::Hit(s) => {
-                    c.release(0, s);
+                    c.release(s);
                     return;
                 }
                 Lookup::Stalled => return,
@@ -152,8 +152,8 @@ impl RamTier {
             std::ptr::copy_nonoverlapping(src.as_ptr(), self.slab(slot), self.span);
         }
         let mut c = self.cache.lock().unwrap();
-        c.publish(0, slot);
-        c.release(0, slot);
+        c.publish(slot);
+        c.release(slot);
     }
 }
 
@@ -214,8 +214,15 @@ struct Shared {
 }
 
 impl Shared {
+    /// Flat expert id for the cache: `(layer, expert)` folded on the pack's
+    /// experts-per-layer, so a layer's ids never collide with another's.
+    fn id_of(&self, layer: u16, expert: u16) -> u32 {
+        layer as u32 * self.experts_per_layer as u32 + expert as u32
+    }
+
     fn idx(&self, layer: u16, slot: u32) -> usize {
-        layer as usize * self.slots_per_layer as usize + slot as usize
+        let _ = layer;
+        slot as usize
     }
 }
 
@@ -300,7 +307,12 @@ impl Pager {
 
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
-                cache: ExpertCache::new(layers, cfg.slots_per_layer, cfg.decay_interval),
+                cache: ExpertCache::partitioned(
+                layers as u32,
+                meta.experts_per_layer as u32,
+                cfg.slots_per_layer,
+                cfg.decay_interval,
+            ),
                 fill: vec![Fill::Empty; total_slots],
             }),
             cv: Condvar::new(),
@@ -362,7 +374,7 @@ impl Pager {
         for &expert in experts {
             let slot = loop {
                 let mut st = self.shared.state.lock().unwrap();
-                match st.cache.acquire(layer, expert) {
+                match st.cache.acquire(self.shared.id_of(layer, expert)) {
                     Lookup::Hit(slot) => break slot,
                     Lookup::Miss { slot, .. } => {
                         let idx = self.shared.idx(layer, slot);
@@ -387,11 +399,11 @@ impl Pager {
                             self.shared.cv.wait_timeout(st, STALL_GRACE).unwrap();
                         st = guard;
                         if res.timed_out() {
-                            let base = self.shared.idx(layer, 0);
-                            let n = self.shared.slots_per_layer as usize;
-                            let in_flight =
-                                st.fill[base..base + n].iter().any(|f| *f == Fill::InFlight);
-                            if !in_flight {
+                            // `is_wedged` asks the cache directly: every slot
+                            // this id could use is pinned *and* published, so
+                            // no fetch will complete and free one.
+                            if st.cache.is_wedged(self.shared.id_of(layer, expert)) {
+                                let n = self.shared.slots_per_layer as usize;
                                 bail!(
                                     "expert cache deadlock: all {n} slots of layer {layer} are \
                                      pinned with no fetch in flight — expert handles were held \
@@ -413,8 +425,8 @@ impl Pager {
     pub fn prefetch(&self, layer: u16, experts: &[u16]) {
         for &expert in experts {
             let mut st = self.shared.state.lock().unwrap();
-            match st.cache.acquire(layer, expert) {
-                Lookup::Hit(slot) => st.cache.release(layer, slot),
+            match st.cache.acquire(self.shared.id_of(layer, expert)) {
+                Lookup::Hit(slot) => st.cache.release(slot),
                 Lookup::Miss { slot, .. } => {
                     let idx = self.shared.idx(layer, slot);
                     st.fill[idx] = Fill::InFlight;
@@ -452,7 +464,7 @@ impl Pager {
 
     pub fn release(&self, h: ExpertHandle) {
         let mut st = self.shared.state.lock().unwrap();
-        st.cache.release(h.layer, h.slot);
+        st.cache.release(h.slot);
         drop(st);
         self.shared.cv.notify_all();
     }
@@ -639,9 +651,9 @@ fn worker(
 
         let mut st = shared.state.lock().unwrap();
         st.fill[idx] = Fill::Ready;
-        st.cache.publish(job.layer, job.slot);
+        st.cache.publish(job.slot);
         if job.release_after_fill {
-            st.cache.release(job.layer, job.slot);
+            st.cache.release(job.slot);
         }
         drop(st);
         shared.cv.notify_all();
