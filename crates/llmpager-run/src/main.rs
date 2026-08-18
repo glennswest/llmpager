@@ -192,21 +192,31 @@ fn main() -> Result<()> {
             Ok(got)
         }
 
-        // Baseline: one uninterrupted context on the anonymous slot.
+        // Staged, so a failure names the property that broke.
+        // A: baseline, one uninterrupted context on the anonymous slot.
         let fresh = run(&mut dec, 0, &prompt_ids, 0, max_tokens, max_seq)?;
 
-        // Build the same prefix on slot 1, park it, deliberately clobber the
-        // slot with unrelated tokens, then restore and continue.
+        // B: the same context on another sequence slot (slot isolation).
+        let other = run(&mut dec, 1, &prompt_ids, 0, max_tokens, max_seq)?;
+        if fresh != other {
+            bail!("session-selftest FAIL (slot isolation): slot 1 != slot 0\n  slot0: {fresh:?}\n  slot1: {other:?}");
+        }
+
+        // C: split prefill on one slot (prefix reuse, no KV copy involved).
+        run(&mut dec, 1, &prompt_ids[..split], 0, 0, max_seq)?;
+        let reused = run(&mut dec, 1, &prompt_ids, split, max_tokens, max_seq)?;
+        if fresh != reused {
+            bail!("session-selftest FAIL (prefix reuse): resuming at {split} diverged\n  fresh:  {fresh:?}\n  reused: {reused:?}");
+        }
+
+        // D: export the prefix, clobber the slot, restore, continue.
         run(&mut dec, 1, &prompt_ids[..split], 0, 0, max_seq)?;
         let blob = dec.kv_export(1, split)?;
         run(&mut dec, 1, &prompt_ids[split..], 0, 0, max_seq)?;
         dec.kv_import(1, split, &blob)?;
         let restored = run(&mut dec, 1, &prompt_ids, split, max_tokens, max_seq)?;
-
         if fresh != restored {
-            bail!(
-                "session-selftest FAIL: restored context diverged\n  fresh:    {fresh:?}\n                   restored: {restored:?}"
-            );
+            bail!("session-selftest FAIL (kv export/import): restored context diverged\n  fresh:    {fresh:?}\n  restored: {restored:?}");
         }
         eprintln!(
             "session-selftest PASS: {} tokens identical after export/clobber/import of a \
