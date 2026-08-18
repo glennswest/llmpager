@@ -946,6 +946,9 @@ fn handle(
                         send(&serde_json::json!({"object": obj, "model": model,
                                                   "choices": [choice]}));
                     };
+                    // Streaming reports the same session accounting the
+                    // non-streaming path does, in the final event.
+                    let mut sess_info = None;
                     let result = match &sess {
                         Some((sid, slot, reuse, ids)) => generate_session(
                             engine, *slot, *reuse, ids, max_tokens, &sampling, Some(&mut cb),
@@ -953,7 +956,9 @@ fn handle(
                         .map(|(_, ctx, prefilled, c, secs)| {
                             let p = ids.len();
                             engine.sessions.commit(sid, ctx);
-                            let _ = prefilled;
+                            sess_info = Some(serde_json::json!({"session": sid, "slot": slot,
+                                "prompt_tokens_reused": reuse,
+                                "prompt_tokens_prefilled": prefilled}));
                             (String::new(), p, c, secs)
                         }),
                         None => generate(engine, &prompt, max_tokens, &sampling, Some(&mut cb)),
@@ -965,12 +970,18 @@ fn handle(
                             } else {
                                 serde_json::json!({"index": 0, "text": "", "finish_reason": "stop"})
                             };
+                            let mut perf = serde_json::json!({"seconds": secs,
+                                "tok_per_sec": c as f64 / secs.max(1e-9)});
+                            if let (Some(info), Some(o)) = (sess_info, perf.as_object_mut()) {
+                                if let Some(fields) = info.as_object() {
+                                    o.extend(fields.clone().into_iter());
+                                }
+                            }
                             send(&serde_json::json!({"object": obj, "model": model,
                                 "choices": [done_choice],
                                 "usage": {"prompt_tokens": p, "completion_tokens": c,
                                            "total_tokens": p + c},
-                                "llmpager": {"seconds": secs,
-                                              "tok_per_sec": c as f64 / secs.max(1e-9)}}));
+                                "llmpager": perf}));
                             let _ = tx.send(b"data: [DONE]\n\n".to_vec());
                         }
                         Err(e) => {
