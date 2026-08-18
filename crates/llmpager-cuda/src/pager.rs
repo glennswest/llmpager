@@ -290,6 +290,14 @@ impl Pager {
         }
         let cfg = cfg;
         let total_slots = layers as usize * cfg.slots_per_layer as usize;
+        // Opt-in while it is being measured; per-layer pools stay the default.
+        let global_pool = std::env::var("LLMPAGER_GLOBAL_POOL").ok().as_deref() == Some("1");
+        if global_pool {
+            eprintln!(
+                "expert cache: one global pool of {total_slots} slots ({} layers x {})",
+                layers, cfg.slots_per_layer
+            );
+        }
 
         // One arena per layer, sliced into slots: thousands of individual
         // ~2.5MB cuMemAllocs each round up to the allocation granularity
@@ -307,12 +315,27 @@ impl Pager {
 
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
-                cache: ExpertCache::partitioned(
-                layers as u32,
-                meta.experts_per_layer as u32,
-                cfg.slots_per_layer,
-                cfg.decay_interval,
-            ),
+                cache: if global_pool {
+                // One pool for every layer. Slots are interchangeable (blob
+                // size is uniform), so layers with diffuse routing claim more
+                // of them than layers that always pick the same few experts —
+                // the same VRAM, spent where it buys hits. Decay is scaled by
+                // the layer count because a shared pool sees every layer's
+                // insertions, not one layer's.
+                ExpertCache::partitioned(
+                    1,
+                    meta.experts_per_layer as u32,
+                    total_slots as u32,
+                    cfg.decay_interval.saturating_mul(layers as u32).max(1),
+                )
+            } else {
+                ExpertCache::partitioned(
+                    layers as u32,
+                    meta.experts_per_layer as u32,
+                    cfg.slots_per_layer,
+                    cfg.decay_interval,
+                )
+            },
                 fill: vec![Fill::Empty; total_slots],
             }),
             cv: Condvar::new(),
@@ -363,11 +386,14 @@ impl Pager {
     /// for misses. Blocks only if every slot in the layer is pinned (i.e.
     /// concurrent requests exceed capacity), not for I/O.
     pub fn request(&self, layer: u16, experts: &[u16]) -> Result<Vec<ExpertHandle>> {
-        if experts.len() > self.shared.slots_per_layer as usize {
+        let capacity = {
+            let st = self.shared.state.lock().unwrap();
+            st.cache.slots_per_partition() as usize
+        };
+        if experts.len() > capacity {
             bail!(
-                "requested {} experts but layer has only {} slots",
-                experts.len(),
-                self.shared.slots_per_layer
+                "requested {} experts but the cache pool holds only {capacity} slots",
+                experts.len()
             );
         }
         let mut out = Vec::with_capacity(experts.len());
