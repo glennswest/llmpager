@@ -63,6 +63,8 @@ struct Engine {
     cur_slots: u32,
     max_seq: usize,
     sessions: SessionStore,
+    /// VRAM reserve currently in force (bytes); admin requests change it.
+    reserve_bytes: u64,
 }
 
 impl Engine {
@@ -350,7 +352,14 @@ impl Registry {
             }
             let sessions =
                 SessionStore::new(dec.batch_cap(), (spec.session_ram_gb * 1e9) as usize);
-            Ok(Engine { dec, tok, cur_slots: slots, max_seq: spec.max_seq, sessions })
+            Ok(Engine {
+                dec,
+                tok,
+                cur_slots: slots,
+                max_seq: spec.max_seq,
+                sessions,
+                reserve_bytes: spec.reserve_mb * 1_000_000,
+            })
         };
         let engine = match load(&spec, slots) {
             Ok(e) => e,
@@ -1087,10 +1096,19 @@ fn handle(
                 let Some((_, engine)) = r.warm.iter_mut().find(|(n, _)| n == &name) else {
                     continue;
                 };
+                let prev_reserve = engine.reserve_bytes;
                 if let Some(mb) = reserve_mb {
-                    engine.dec.set_reserve_bytes(mb * 1_000_000);
+                    engine.reserve_bytes = mb * 1_000_000;
+                    engine.dec.set_reserve_bytes(engine.reserve_bytes);
                 }
-                engine.dec.resize_cache(want)?;
+                if let Err(e) = engine.dec.resize_cache(want) {
+                    // Do not leave an unsatisfiable reserve armed: the next
+                    // rebalance would trip over it too.
+                    engine.reserve_bytes = prev_reserve;
+                    engine.dec.set_reserve_bytes(prev_reserve);
+                    engine.cur_slots = engine.dec.slots_per_layer();
+                    return Err(e);
+                }
                 engine.cur_slots = engine.dec.slots_per_layer();
                 out.push(serde_json::json!({"model": name, "slots": engine.cur_slots}));
             }

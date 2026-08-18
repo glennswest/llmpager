@@ -560,7 +560,7 @@ impl KimiDecoder {
         self.pending_release.clear();
         let previous = self.slots_per_layer();
         self.pager = None;
-        let build = |slots: u32| {
+        let build = |slots: u32, reserve_bytes: u64| {
             Pager::new(
                 Arc::clone(&self.cuda),
                 &self.pack_path,
@@ -570,18 +570,21 @@ impl KimiDecoder {
                     decay_interval: 64.max(slots * 4),
                     direct: self.direct,
                     ram_bytes: self.ram_bytes,
-                    reserve_bytes: self.reserve_bytes,
+                    reserve_bytes,
                 },
             )
         };
         // See decode.rs: never leave the decoder without a pager.
-        match build(slots) {
+        match build(slots, self.reserve_bytes) {
             Ok(p) => {
                 self.pager = Some(p);
                 Ok(())
             }
             Err(e) => {
-                self.pager = Some(build(previous).context(
+                // Restore service at the previous size, ignoring the reserve:
+                // an unsatisfiable reserve is exactly what tends to land here,
+                // and re-applying it would fail again and leave no pager.
+                self.pager = Some(build(previous, 0).context(
                     "cache resize failed and the previous size could not be restored",
                 )?);
                 Err(e.context(format!("cache resize to {slots} slots failed; kept {previous}")))
