@@ -192,6 +192,56 @@ fn main() -> Result<()> {
             Ok(got)
         }
 
+        // Prefill only, returning the next-token logits — the quantity that
+        // must be preserved. Greedy token equality is too strict a criterion:
+        // chunk boundaries change how each token's experts group into fetch
+        // waves, and summing the same experts in a different order moves the
+        // last bits, which a near-tie argmax can amplify into a different
+        // continuation.
+        fn prefill_logits(
+            dec: &mut AnyDecoder,
+            slot: usize,
+            ids: &[u32],
+            from: usize,
+        ) -> Result<Vec<f32>> {
+            let cap = dec.chunk_cap();
+            let mut pos = from;
+            for chunk in ids[from..].chunks(cap) {
+                let entries: Vec<(u32, usize, usize)> =
+                    chunk.iter().enumerate().map(|(i, t)| (*t, pos + i, slot)).collect();
+                let last = pos + chunk.len() == ids.len();
+                dec.step_multi(&entries, last)?;
+                pos += chunk.len();
+            }
+            Ok(dec
+                .last_logits_multi_or_single()
+                .last()
+                .cloned()
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| dec.last_logits()))
+        }
+
+        let l_fresh = prefill_logits(&mut dec, 0, &prompt_ids, 0)?;
+        prefill_logits(&mut dec, 1, &prompt_ids[..split], 0)?;
+        let l_reuse = prefill_logits(&mut dec, 1, &prompt_ids, split)?;
+        let dmax = l_fresh
+            .iter()
+            .zip(&l_reuse)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let scale = l_fresh.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let am = |v: &[f32]| {
+            v.iter().enumerate().fold((0usize, f32::MIN), |(bi, bv), (i, &x)| {
+                if x > bv { (i, x) } else { (bi, bv) }
+            }).0
+        };
+        eprintln!(
+            "prefix-reuse logits: max |delta| {dmax:.5} on a scale of {scale:.2} ({:.4}%),              argmax {} vs {}",
+            100.0 * dmax / scale.max(1e-9),
+            am(&l_fresh),
+            am(&l_reuse),
+        );
+
         // Staged, so a failure names the property that broke.
         // A: baseline, one uninterrupted context on the anonymous slot.
         let fresh = run(&mut dec, 0, &prompt_ids, 0, max_tokens, max_seq)?;
