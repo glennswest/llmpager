@@ -47,9 +47,6 @@ with 16GB of VRAM:
   2.3 tok/s with 6.2 tok/s prefill. It is host-to-device bandwidth bound
   rather than disk bound — ~7.4GB crosses PCIe per token — so fewer bytes
   per token, or batching, are the only levers that help.
-- **Kimi K2.6** (1T parameters, a 571GB int4 pack) decoded coherently at
-  0.72 tok/s with a pre-warmed RAM tier. Its artifacts were removed in a
-  later disk cleanup, so it is not in the current serving config.
 
 Serving is an OpenAI-compatible HTTP API (`llmpager-serve`) with a
 multi-model registry and LRU model eviction, sampling, lockstep batch
