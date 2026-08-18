@@ -10,7 +10,7 @@ the Linux + CUDA equivalent.
 
 ## Version
 
-Current: **0.20.0** (pre-1.0, API unstable)
+Current: **0.21.0** (pre-1.0, API unstable)
 
 Version locations (must all match):
 - `Cargo.toml` — `[workspace.package] version` (all crates inherit it)
@@ -211,16 +211,16 @@ near-sequential ~9.6GB sweep), uniform blob size (no slot fragmentation).
       write-allocate on disk reads; --ram-gb / serve ram_gb (kimi 80GB
       = ~3,200 experts). First 120-token run: 0.35 -> 0.57 tok/s (+63%)
       with the tier still cold; converges higher on long runs.
-- [x] 2. Global VRAM slot pool (v0.20.0, opt-in `LLMPAGER_GLOBAL_POOL=1`):
-      the premise holds but is worth less than it looked. qwen3-30b at
-      slots=24: hit 51.3 -> 54.9%, streamed 39.70 -> 36.72 GB, decode
-      ~+14% over three paired runs, PPL identical. It stays opt-in because
-      the decay cadence has a cliff — a shared pool takes every layer's
-      insertions, and holding the per-layer *token* cadence (x layers) is
-      worse (45.2%), while decaying too fast collapses the cache to 2-18%.
-      x8 (every ~4 tokens) is the only setting that beat per-layer pools at
-      both sizes tried. Deriving the cadence from the observed miss rate
-      would make it safe to default on. Full table in docs/PERFORMANCE.md.
+- [x] 2. Global VRAM slot pool (v0.20.0/v0.21.0, opt-in and OFF):
+      **better cache, slower engine.** Hit 51.3 -> 54.3% (qwen3-30b) and
+      53.3 -> 59.3% (coder) at slots=24, 6-13% fewer bytes, PPL identical —
+      all reproducible. But under `--direct=1`, the only stable timing
+      instrument on this box, it is ~10% *slower* (12.04/11.93 vs
+      10.45/10.93 tok/s). Something costs more than the fetches it saves;
+      unprofiled candidates are the eviction scan growing 24 -> 1152 slots
+      inside the I/O workers' mutex, and one large residency map replacing
+      48 small ones. Next step is a profile, then a sampled or bucketed
+      victim search. Full write-up in docs/PERFORMANCE.md.
 - [ ] 3. f16 for Kimi attention state: MLA cache rows f32 -> f16
       (2.3KB -> 1.15KB/token; 256K ctx: 590 -> 295MB/seq) and absorbed
       kv_b (kt/vw) bf16 -> f16/fp8 (~0.5GB VRAM back to expert slots).
@@ -325,6 +325,22 @@ Blocking slidemaker: IndexTTS-2 could not start alongside llmpager.
       those would mean dropping live session contexts.
 
 ## Session Log
+
+- 2026-08-18 (later still): **The global pool, measured properly (v0.21.0)
+  — and my own +14% claim withdrawn.** Two corrections, both mine.
+  - Aging was counted in *insertions*, so one constant meant a different
+    real cadence per layer count, cache size and miss rate — hence the
+    cliff (54.9% at slots=24, 2.1% at slots=8, same setting). `Pager::tick`
+    now ages the shared pool every N forward passes (default 4); the
+    response curve is smooth and unimodal at both sizes. When a tuning
+    constant is cliff-edged, suspect the unit.
+  - The "+14% decode" I put in the v0.20.0 changelog was noise. Undirected
+    generation timing here spans ±20% (the same baseline gave 9.29-12.33
+    tok/s across batches), and the winner flipped between measurement
+    batches. Under `--direct=1`, stable to ~1%, the shared pool is ~10%
+    *slower* while moving 6% fewer bytes. So: cache gains real, throughput
+    loss real, feature stays off. **Deterministic counters for tuning;
+    `--direct=1` and repeats for wall-clock.**
 
 - 2026-08-18 (later): **Flat expert ids and an optional global slot pool
   (v0.20.0), closes #1.** `ExpertCache` now keys on a flat `u32` and draws

@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [v0.21.0] — 2026-08-18
+
+The global slot pool, measured properly — and withdrawn as a speed win.
+
+### Changed
+- The shared pool ages per forward pass (`Pager::tick`, default every 4,
+  `LLMPAGER_POOL_DECAY_TOKENS`) instead of per insertion. The old unit
+  meant one constant implied a different real cadence for every layer
+  count, cache size and miss rate: the setting that gave 54.9% hit at
+  slots=24 collapsed the cache to 2.1% at slots=8. The response curve is
+  now smooth and unimodal at both sizes. Per-layer pools are untouched
+- `LLMPAGER_POOL_DECAY_MULT` replaced by `LLMPAGER_POOL_DECAY_TOKENS`
+
+### Corrected
+- **v0.20.0's "decode ~+14%" for the global pool was noise and is
+  withdrawn.** Undirected generation timing on this box spans ±20% run to
+  run; three paired runs cannot see a 6% effect. Measured again under
+  `--direct=1`, where timing is stable to ~1%, the shared pool is about
+  **10% slower** (12.04/11.93 vs 10.45/10.93 tok/s) *despite* moving 6%
+  fewer bytes. Cause unidentified — the eviction scan grows from 24 slots
+  to 1152 inside the mutex the I/O workers need, and one large residency
+  map replaces 48 small ones. It stays opt-in and off
+- The cache-side gains are real and reproducible: hit 51.3 -> 54.3% on
+  qwen3-30b and 53.3 -> 59.3% on qwen3-coder at slots=24, 6-13% fewer
+  bytes streamed, PPL identical at 18.7649
+
 ## [v0.20.0] — 2026-08-18
 
 Flat expert ids, and an optional global slot pool.
@@ -11,12 +37,9 @@ Flat expert ids, and an optional global slot pool.
   partitions; `(layer, expert)` folds as `layer * experts_per_layer +
   expert` (#1). One partition per layer is the previous behaviour exactly;
   a flat expert population is one partition with no folding
-- `LLMPAGER_GLOBAL_POOL=1`: every layer shares one slot pool. Measured on
-  qwen3-30b-a3b at slots=24: hit 51.3% -> 54.9%, streamed 39.70 -> 36.72
-  GB, decode ~+14% over three paired runs. PPL identical (18.7649), so it
-  is lossless. Opt-in — the decay cadence it needs has a sharp cliff
-  (2-18% hit if mistuned), documented in docs/PERFORMANCE.md
-- `LLMPAGER_POOL_DECAY_MULT` (default 8) to re-tune that cadence
+- `LLMPAGER_GLOBAL_POOL=1`: every layer shares one slot pool. Opt-in.
+  (The "~+14% decode" first claimed here was measurement noise and is
+  withdrawn in v0.21.0, which measures it properly.)
 
 ### Changed
 - Slots are global indices, so `publish`/`is_ready`/`release` take a slot

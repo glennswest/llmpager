@@ -203,53 +203,73 @@ three ALU ops. Kernel: 122 → 137.7 GB/s; decode: 37.6 → **41.0 tok/s**.
 Re-testing core-q4 with the faster kernel: still loses (35.2 vs 41.0) —
 the rejection survives its own fix. Total arc: 19.9 → 41.0 (+106%).
 
-### 15. Global VRAM slot pool (M8 item 2) — +3.6pp hit, and a sharp cliff
+### 15. Global VRAM slot pool (M8 item 2) — better cache, slower engine
 
 One shared slot pool for every layer instead of a private array each.
 Blob size is uniform, so any slot fits any expert and layers with diffuse
-routing can claim more of them. `LLMPAGER_GLOBAL_POOL=1`; opt-in.
+routing can claim more of them. `LLMPAGER_GLOBAL_POOL=1`; **opt-in, and
+staying that way.**
 
-Measured on qwen3-30b-a3b, 100-token prompt, 60 tokens generated. Hit
-rate and bytes streamed are exactly reproducible run to run; wall-clock
-decode is not (the same per-layer baseline measured 9.53-12.36 tok/s
-across runs), so the deterministic metrics drive the conclusion and
-timings are reported as paired repeats.
+The cache half of the premise holds, and reproducibly. qwen3-30b-a3b and
+qwen3-coder-30b-a3b, 100-token prompt, 60 tokens generated:
 
-| slots | pools | hit | streamed |
-|-------|-------|-----|----------|
-| 24 | per-layer | 51.3% | 39.70 GB |
-| 24 | global | **54.9%** | **36.72 GB** |
-| 8 | per-layer | 27.4% | 59.14 GB |
-| 8 | global | **28.7%** | **58.08 GB** |
+| model | slots | hit (per-layer -> global) | streamed |
+|-------|-------|---------------------------|----------|
+| 30b | 24 | 51.3% -> **54.3%** | 39.70 -> 37.21 GB |
+| 30b | 8 | 27.4% -> 27.6% | 59.14 -> 58.98 GB |
+| coder | 24 | 53.3% -> **59.3%** | 36.70 -> 32.02 GB |
+| coder | 8 | 24.8% -> 25.6% | 59.15 -> 58.47 GB |
 
-Three paired decode runs at slots=24: per-layer 11.47 / 9.97 / 9.53
-tok/s, global 12.75 / 12.16 / 10.35 — global wins every pair, ~+14% on
-the mean. Teacher-forced perplexity (a steadier workload) agrees: 9.47
--> 10.70 tok/s, with PPL identical at 18.7649, so the pool is lossless.
+Perplexity is identical (18.7649), so it is lossless.
 
-**The decay interval is the whole game, and it has a cliff.** Decay
-halves every counter in a partition every N insertions. A shared pool
-takes every layer's insertions (~layers x top_k x miss_rate per token),
-so holding the per-layer *token* cadence means multiplying N by the
-layer count — and that measured worse (45.2% at x48). What works is
-letting recency count for more: x8, decaying every ~4 tokens instead of
-~24. Below that the counters are crushed before they accumulate, LFU
-degenerates into thrash, and the cache collapses:
+**And it is still slower.** Under `--direct=1`, where wall-clock on this
+box is stable to about 1%, the engine loses roughly 10% despite moving
+6% fewer bytes:
+
+| run | per-layer | global |
+|-----|-----------|--------|
+| 1 | 12.04 tok/s | 10.45 tok/s |
+| 2 | 11.93 tok/s | 10.93 tok/s |
+
+Something in the shared pool costs more than the fetches it saves. Two
+candidates, neither confirmed: eviction scans the whole pool for the
+lowest-frequency unpinned slot — 1152 slots instead of 24, inside the
+mutex the I/O workers need to publish fills — and one large residency
+map replaces 48 small ones. Profile before touching it again; a sampled
+or bucketed victim search would test the first directly.
+
+**Two measurement lessons, both learned the hard way here.**
+
+*The first A/B said the pool was clearly worse* (45.2% vs 51.3% hit). It
+was running a decay constant picked by guess. The idea was fine; the
+parameter was wrong — worth remembering before writing off a design.
+
+*Then three separate timing batches disagreed about the winner.* Without
+`--direct`, generation timing on this box spans ±20% run to run: the same
+per-layer baseline measured 9.53, 9.97, 11.47, 9.29, 11.50 and 12.33
+tok/s. A 6% effect is invisible in that. **v0.20.0 shipped a "+14%
+decode" claim built on three paired runs of exactly this noise; it did
+not survive being measured properly and is withdrawn.** Hit rate and
+bytes streamed are exactly reproducible and are what tuning should use;
+for wall-clock, use `--direct=1` and repeat.
+
+**The decay cadence had a cliff, and the unit was why.** Aging counted
+insertions, so one constant meant a different real cadence for every
+layer count, cache size and miss rate — the setting that gave 54.9% at
+slots=24 collapsed to 2.1% at slots=8. `Pager::tick()` now ages the pool
+every N forward passes (default 4, `LLMPAGER_POOL_DECAY_TOKENS`), and
+the response curve is smooth and unimodal at both sizes:
 
 | decay | hit @ slots=24 | hit @ slots=8 |
 |-------|----------------|---------------|
-| x2 | 18.3% | 4.7% |
-| x4 | 53.4% | 2.1% |
-| **x8** | **54.9%** | **28.7%** |
-| x16 | 52.0% | 29.2% |
-| x48 | 45.2% | — |
+| 1 token | 36.2% | 25.7% |
+| 2 tokens | 50.7% | **28.0%** |
+| **4 tokens** | **54.3%** | 27.6% |
+| 8 tokens | 52.7% | 21.5% |
+| 16 tokens | 41.6% | 15.5% |
 
-x8 is the only setting that beat per-layer pools at both sizes, so it is
-the default (`LLMPAGER_POOL_DECAY_MULT` overrides). That sensitivity is
-why the pool stays opt-in: the win is real but modest, and the failure
-mode of a mistuned constant is a 2% hit rate rather than a small
-regression. Worth revisiting if the decay cadence can be derived from
-the observed miss rate instead of guessed.
+Worth keeping even though the feature is off: when a tuning constant is
+cliff-edged, suspect the unit before adding a lookup table.
 
 ### Fixed along the way
 
