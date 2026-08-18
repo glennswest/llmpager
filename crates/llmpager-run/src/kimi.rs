@@ -558,20 +558,35 @@ impl KimiDecoder {
     pub fn resize_cache(&mut self, slots: u32) -> Result<()> {
         self.cuda.sync()?;
         self.pending_release.clear();
+        let previous = self.slots_per_layer();
         self.pager = None;
-        self.pager = Some(Pager::new(
-            Arc::clone(&self.cuda),
-            &self.pack_path,
-            PagerConfig {
-                slots_per_layer: slots,
-                io_threads: self.io_threads,
-                decay_interval: 64.max(slots * 4),
-                direct: self.direct,
-                ram_bytes: self.ram_bytes,
-                reserve_bytes: self.reserve_bytes,
-            },
-        )?);
-        Ok(())
+        let build = |slots: u32| {
+            Pager::new(
+                Arc::clone(&self.cuda),
+                &self.pack_path,
+                PagerConfig {
+                    slots_per_layer: slots,
+                    io_threads: self.io_threads,
+                    decay_interval: 64.max(slots * 4),
+                    direct: self.direct,
+                    ram_bytes: self.ram_bytes,
+                    reserve_bytes: self.reserve_bytes,
+                },
+            )
+        };
+        // See decode.rs: never leave the decoder without a pager.
+        match build(slots) {
+            Ok(p) => {
+                self.pager = Some(p);
+                Ok(())
+            }
+            Err(e) => {
+                self.pager = Some(build(previous).context(
+                    "cache resize failed and the previous size could not be restored",
+                )?);
+                Err(e.context(format!("cache resize to {slots} slots failed; kept {previous}")))
+            }
+        }
     }
 
     /// LLMPAGER_DEBUG=1: print staged layer-0 probes for the first token,
