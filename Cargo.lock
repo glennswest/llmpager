@@ -288,7 +288,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llmpager-bench"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "llmpager-core",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "llmpager-convert"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "llmpager-core",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "llmpager-core"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "llmpager-cuda"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "llmpager-run"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "llmpager-core",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "llmpager-serve"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "llmpager-run",

@@ -166,9 +166,14 @@ impl SessionStore {
         };
         let e = self.map.get_mut(id).expect("just inserted");
         e.slot = Some(slot);
-        if reuse == 0 {
-            e.tokens.clear();
-        }
+        // From here the caller overwrites everything from `reuse` onward, so
+        // only that prefix is still guaranteed to match the slot. Record it
+        // now: a generation that fails part-way never reaches `commit`, and
+        // a stale longer token list would let the next turn claim reuse the
+        // KV can no longer honour — silently wrong output rather than a
+        // slower one. On success `commit` replaces this with the full
+        // context.
+        e.tokens.truncate(reuse);
         Ok((slot, reuse))
     }
 
@@ -485,6 +490,11 @@ fn generate_session(
     }
 
     let mut out_ids: Vec<u32> = Vec::new();
+    // Generated tokens whose KV actually landed in the slot. Every token is
+    // fed back before the next is produced, so this is normally all of them
+    // -- except the last one at the max_seq boundary, which is emitted and
+    // then never stepped. The stored context must not claim it.
+    let mut kv_tokens = 0usize;
     let mut printed = String::new();
     for i in 0..max_tokens {
         if engine.dec.eos().contains(&next) {
@@ -503,9 +513,11 @@ fn generate_session(
         }
         let p = ids.len() + i;
         if p + 1 >= engine.max_seq {
+            // Emitted but never fed back, so it has no KV — see `kv_tokens`.
             break;
         }
         let out = engine.dec.step_multi(&[(next, p, slot)], true)?;
+        kv_tokens = out_ids.len();
         next = if plain_greedy {
             out[0]
         } else {
@@ -517,10 +529,9 @@ fn generate_session(
         .tok
         .decode(&out_ids, true)
         .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
-    // The KV now covers prompt + everything generated: each generated token
-    // was fed back through `step_multi` before the next was produced.
+    // The context handed back must describe exactly what the slot holds.
     let mut context = ids.to_vec();
-    context.extend_from_slice(&out_ids);
+    context.extend_from_slice(&out_ids[..kv_tokens]);
     Ok((text, context, ids.len() - reuse, out_ids.len(), t0.elapsed().as_secs_f64()))
 }
 
