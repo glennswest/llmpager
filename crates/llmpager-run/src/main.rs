@@ -231,21 +231,30 @@ fn main() -> Result<()> {
                 .fold((0usize, f32::MIN), |(bi, bv), (i, &x)| if x > bv { (i, x) } else { (bi, bv) })
                 .0
         };
-        // A: one chunk. B: same context from scratch, chunked at `split`.
-        // C: prefix reuse, resuming at `split`. A/B isolates chunk grouping
-        // alone; B/C isolates what reuse itself changes.
+        // Controls first: the same context prefilled from scratch under
+        // three different chunk groupings. Any spread there is inherent to
+        // chunked prefill (expert waves group differently, so partial sums
+        // land in a different order) and is the yardstick for judging what
+        // prefix reuse costs.
         let l_a = prefill_logits(&mut dec, 0, &prompt_ids, 0, usize::MAX)?;
-        let l_b = prefill_logits(&mut dec, 1, &prompt_ids, 0, split)?;
+        let l_g1 = prefill_logits(&mut dec, 1, &prompt_ids, 0, 32)?;
+        let l_g2 = prefill_logits(&mut dec, 1, &prompt_ids, 0, 17)?;
         prefill_logits(&mut dec, 1, &prompt_ids[..split], 0, usize::MAX)?;
         let l_c = prefill_logits(&mut dec, 1, &prompt_ids, split, usize::MAX)?;
         let scale = l_a.iter().fold(0f32, |m, v| m.max(v.abs()));
         eprintln!(
-            "logit deltas (scale {scale:.2}): grouping A/B {:.5}, reuse B/C {:.5}, A/C {:.5}; argmax {} {} {}",
-            delta(&l_a, &l_b),
-            delta(&l_b, &l_c),
+            "prompt {} tokens, split {split}, chunk_cap {}",
+            prompt_ids.len(),
+            dec.chunk_cap()
+        );
+        eprintln!(
+            "logit deltas (scale {scale:.2}): grouping cap64/32 {:.5}, cap64/17 {:.5} | reuse {:.5}; argmax {} {} {} {}",
+            delta(&l_a, &l_g1),
+            delta(&l_a, &l_g2),
             delta(&l_a, &l_c),
             am(&l_a),
-            am(&l_b),
+            am(&l_g1),
+            am(&l_g2),
             am(&l_c),
         );
 
