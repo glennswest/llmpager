@@ -244,8 +244,6 @@ impl Decoder {
         let ke = self.kernels;
         let ke = &ke;
         let st = self.stream;
-        let qkv = (c.heads * c.head_dim) as i32;
-        let kvd = (c.kv_heads * c.head_dim) as i32;
         let hid = c.hidden as i32;
 
         ke.bf16_row(cu, self.core.embed, token as i32, hid, self.h, st)?;

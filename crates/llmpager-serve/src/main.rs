@@ -772,7 +772,6 @@ fn main() -> Result<()> {
         let url = req.url().to_string();
         let method = req.method().as_str().to_string();
         let mut body = String::new();
-        use std::io::Read;
         let _ = req.as_reader().read_to_string(&mut body);
         let resp = handle(&registry, &default_model, &method, &url, &body);
         let _ = match resp {
