@@ -208,6 +208,11 @@ struct Shared {
     // Latency histogram buckets: <1, <2, <5, <10, <20, <50, >=50 ms.
     lat_buckets: [AtomicU64; 7],
     ram: Option<RamTier>,
+    /// One shared pool for every layer, with decay driven by `tick`.
+    global_pool: bool,
+    /// Forward passes between decays of the shared pool.
+    decay_tokens: u32,
+    ticks: AtomicU64,
     /// Per-(layer, expert) fetch counts — the profile that drives pre-warm.
     fetch_counts: Vec<AtomicU64>,
     experts_per_layer: u16,
@@ -326,22 +331,9 @@ impl Pager {
                     1,
                     meta.experts_per_layer as u32,
                     total_slots as u32,
-                    // Decay cadence, in insertions. A shared pool takes every
-                    // layer's insertions (~layers x top_k x miss_rate per
-                    // token), so holding the per-layer *token* cadence would
-                    // mean multiplying by the layer count -- measured worse.
-                    // A shared pool wants recency to count for more, and x8
-                    // (decay every ~4 tokens rather than ~24) was the only
-                    // setting that beat per-layer pools at both cache sizes
-                    // tried. Below ~x4 the counters are crushed before they
-                    // accumulate and LFU degenerates into thrash: 18% hit at
-                    // x2, 2% at x4 on a small cache. Override to re-tune.
-                    std::env::var("LLMPAGER_POOL_DECAY_MULT")
-                        .ok()
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .unwrap_or(8)
-                        .saturating_mul(cfg.decay_interval)
-                        .max(1),
+                    // Decay is driven by `tick` (once per forward pass), not
+                    // by insertion count, so disable the insertion path.
+                    u32::MAX,
                 )
             } else {
                 ExpertCache::partitioned(
@@ -364,6 +356,13 @@ impl Pager {
                 .map(|_| AtomicU64::new(0))
                 .collect(),
             experts_per_layer: meta.experts_per_layer,
+            global_pool,
+            decay_tokens: std::env::var("LLMPAGER_POOL_DECAY_TOKENS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(4)
+                .max(1),
+            ticks: AtomicU64::new(0),
             fetches: AtomicU64::new(0),
             lat_buckets: Default::default(),
         });
@@ -512,6 +511,21 @@ impl Pager {
 
     pub fn slots_per_layer(&self) -> u32 {
         self.shared.slots_per_layer
+    }
+
+    /// Mark the end of a forward pass. A shared pool ages on this rather than
+    /// on insertion count: "every N tokens" means the same thing whatever the
+    /// layer count, cache size and miss rate happen to be, which is exactly
+    /// what an insertion-counted interval could not promise. No-op for
+    /// per-layer pools, which keep their own insertion counters.
+    pub fn tick(&self) {
+        if !self.shared.global_pool {
+            return;
+        }
+        let n = self.shared.ticks.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % self.shared.decay_tokens as u64 == 0 {
+            self.shared.state.lock().unwrap().cache.decay_all();
+        }
     }
 
     /// Per-(layer, expert) fetch counts, row-major — a workload profile.

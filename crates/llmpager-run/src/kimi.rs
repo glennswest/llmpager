@@ -795,6 +795,7 @@ impl KimiDecoder {
                 best = i as u32;
             }
         }
+        self.pager.as_ref().unwrap().tick();
         Ok(best)
     }
 
@@ -1020,6 +1021,7 @@ impl KimiDecoder {
             }
         }
 
+        self.pager.as_ref().unwrap().tick();
         if !want_logits {
             return Ok(vec![0; n]);
         }

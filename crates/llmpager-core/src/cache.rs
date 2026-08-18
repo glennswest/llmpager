@@ -210,6 +210,20 @@ impl ExpertCache {
         s.pins -= 1;
     }
 
+    /// Halve every frequency counter, in every partition. Insertion-counted
+    /// decay cannot serve a shared pool: the same constant means a different
+    /// real cadence for every layer count, cache size and miss rate, which is
+    /// where the tuning cliff came from. Callers that know where a token ends
+    /// can drive this directly instead.
+    pub fn decay_all(&mut self) {
+        for s in &mut self.slots {
+            s.freq /= 2;
+        }
+        for p in &mut self.parts {
+            p.inserts_since_decay = 0;
+        }
+    }
+
     /// True when every slot the id could use is pinned *and* none of them is
     /// mid-fetch — nothing will free itself, so a waiter would wait forever.
     pub fn is_wedged(&self, id: ExpertId) -> bool {
@@ -360,6 +374,30 @@ mod tests {
             assert!(matches!(c.acquire(id), Lookup::Hit(_)), "layer 0 expert {e} evicted");
         }
         assert!(matches!(c.acquire(id1), Lookup::Hit(_)));
+    }
+
+    #[test]
+    fn decay_all_halves_every_partition() {
+        let mut c = ExpertCache::partitioned(2, 128, 2, 1_000_000);
+        for (layer, expert) in [(0u16, 1u16), (1, 1)] {
+            let id = ExpertCache::fold(layer, expert, 128);
+            let Lookup::Miss { slot, .. } = c.acquire(id) else { panic!() };
+            c.publish(slot);
+            c.release(slot);
+            for _ in 0..7 {
+                let Lookup::Hit(s) = c.acquire(id) else { panic!() };
+                c.release(s);
+            }
+        }
+        // freq 8 in both partitions; one decay leaves 4, still the hottest.
+        c.decay_all();
+        for layer in [0u16, 1] {
+            let cold = ExpertCache::fold(layer, 9, 128);
+            let Lookup::Miss { slot, .. } = c.acquire(cold) else { panic!() };
+            c.release(slot);
+            let hot = ExpertCache::fold(layer, 1, 128);
+            assert!(matches!(c.acquire(hot), Lookup::Hit(_)), "layer {layer} evicted its hot expert");
+        }
     }
 
     #[test]
